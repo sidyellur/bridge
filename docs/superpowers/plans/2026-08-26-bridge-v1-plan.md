@@ -14,17 +14,24 @@ Ordered, independently executable tasks. Within each task, tests are written bef
 
 ---
 
-### Task 1 — Experiments A, B, C, D
+### Task 1 — Experiments A, B, C, D — ✅ **DONE (2026-08-26)**
 
-**Why:** Four behaviors of the vendor CLIs gate design decisions (warm resume for Claude, warm resume for Codex, `codex queue` idle semantics, Codex pid→thread mapping). Running them after writing the gated code means rewriting the gated code.
+**Why:** Four behaviors of the vendor CLIs gate design decisions. Running them after writing the gated code means rewriting the gated code.
 
-**Scope:** Run each experiment exactly as written in spec §14 against live TUIs. Record raw command output and the verdicts in `docs/experiments/2026-08-26-cli-semantics.md`: for A/B, fork-vs-append and lock behavior; for C, auto-process vs wait-for-Enter (this fixes the `text` wording used in Tasks 7 and 9); for D, the working pid→thread recipe (this fixes Task 3's Codex resolver). Each verdict is one labeled line so later tasks can cite it.
+**Outcome:** All four resolved against disposable sessions in `~/bridge-lab`. Full results, including the raw branch evidence, are in **spec §14**. The headline results every downstream task must honour:
 
-**Files:** `docs/experiments/2026-08-26-cli-semantics.md`.
+1. **Claude has no writer lock.** A headless resume into a *live* session appends silently and then **branches the user's conversation** (spec §14.1). Tasks 4 and 7 must gate every resume on liveness and **fail closed**.
+2. **Codex refuses** a resume into a locked thread with a clean `-32600` error — detect it and fall back, do not treat it as failure.
+3. **`codex queue` is a real mailbox** — it works against a non-running session and is delivered *and answered* on the thread's next run. `text` is honestly "a text message" for Codex targets. But a Codex session with **no rollout yet is unaddressable**; roster must mark it so (Task 4).
+4. **Codex pid→thread = `lsof -p <pid>`** on the held `.lock` fds; one TUI holds two locks (main + child), so Task 3 must pick the main and Task 4 must filter the child.
 
-**Depends on:** nothing. Requires a human at the keyboard (live TUIs) — schedule with the user.
+Plus, pinned in spec §14.3: `--sandbox` must precede `resume`; Claude holds no session file open (so the hook registry has **no fallback**); the parent-pid walk works; the Claude format has native `queue-operation` records worth investigating before building the spool (Task 6); mtime is useless for liveness.
 
-**Verify:** the experiments file exists and contains a filled `Verdict:` line for each of A, B, C, D (no "TBD"). `grep -c '^Verdict:' docs/experiments/2026-08-26-cli-semantics.md` prints `4`.
+**Files:** results recorded in spec §14 (no separate experiments file needed).
+
+**Depends on:** nothing.
+
+**Verify:** ✅ spec §14 contains a resolved result for A, A′, B, B′, C, C′, D with no "TBD".
 
 ---
 
@@ -102,11 +109,16 @@ Ordered, independently executable tasks. Within each task, tests are written bef
 
 **Why:** The core of `call` (spec §§8, 10, 13): fresh-headless spawn, capability contract, structured-response parsing, timeout, carbon copy.
 
-**Scope (TDD):** tests first (all against fake `claude`/`codex` shims) for: fresh-headless spawn in the addressed session's cwd with the correct read-only flags (`--allowedTools "Read,Grep,Glob"` / `--sandbox read-only`) and write flags under `allow_writes=true`; `BRIDGE_HOP=1` in the callee env; fork-id recording into `forks.json` before output is read; capability preamble text containing the decline instruction; parsing of the fenced JSON `{answer, blocked, capability}` with fallback-to-raw on parse failure (plus `meta` note); `escalation` string generation when `blocked` is non-empty; timeout kill of the process group at `timeout_s` (≤60 enforced) with the timed-out result shape; carbon-copy gist (deterministic truncation, ≤200/≤300 chars) delivered via the Task 6 ringer, `cc_delivered` reflecting the outcome; transcript entries for consult and cc. Warm resume: implement `warm=true` only if Experiments A and B both returned safe verdicts; otherwise the parameter is not exposed and a test asserts it is absent.
+**Scope (TDD):** tests first (all against fake `claude`/`codex` shims) for: fresh-headless spawn in the addressed session's cwd with the correct read-only flags (`--allowedTools "Read,Grep,Glob"` / `--sandbox read-only`) and write flags under `allow_writes=true`; `BRIDGE_HOP=1` in the callee env; fork-id recording into `forks.json` before output is read; capability preamble text containing the decline instruction; parsing of the fenced JSON `{answer, blocked, capability}` with fallback-to-raw on parse failure (plus `meta` note); `escalation` string generation when `blocked` is non-empty; timeout kill of the process group at `timeout_s` (≤60 enforced) with the timed-out result shape; carbon-copy gist (deterministic truncation, ≤200/≤300 chars) delivered via the Task 6 ringer, `cc_delivered` reflecting the outcome; transcript entries for consult and cc. **Warm resume — revised by Experiment results (spec §14).** Both CLIs append rather than fork, so `warm=true` **is** exposed in v1 — but it is gated on liveness at runtime, not on a build-time flag:
+
+- Before any resume, assert the target is **not live** via the Task 4 liveness check. **Fail closed**: if liveness is undetermined, treat the target as live and refuse.
+- A refused warm resume degrades to fresh-headless and says so in `meta.answered_by` — it never errors out at the user.
+- For Codex targets, additionally catch the `-32600` "already has an active writer" error as a *second* line of defence and degrade the same way; treat it as an expected branch, not a failure.
+- **Mandatory regression test:** a unit test asserting that a resume against a live target is never spawned — the Claude branch corruption in spec §14.1 is silent and damages the *user's own* conversation, so this assertion is the single most important test in the suite. Include a test for the undetermined-liveness case proving it fails closed.
 
 **Files:** `src/bridge/consult.py`, `src/bridge/prompts.py` (preamble + gist templates), `tests/test_consult.py`.
 
-**Depends on:** Tasks 4, 5, 6; Experiments A, B.
+**Depends on:** Tasks 4, 5, 6. (Experiments A, B — done; see spec §14.)
 
 **Verify:** `pytest tests/test_consult.py` passes; live check (`pytest -m live -k consult_smoke`): a real `call` from the test harness to a live Codex session's cwd returns a structured answer and the cc lands in that Codex TUI.
 
