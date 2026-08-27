@@ -128,11 +128,13 @@ Ordered, independently executable tasks. Within each task, tests are written bef
 
 ### Task 9 — `call_async` worker
 
-**Why:** The default verb (spec §8) needs its detached-worker mechanics: state file, delivery via ringer, orphan safety.
+**Why:** Non-blocking consults (spec §8) need detached-worker mechanics: state file, delivery via ringer, orphan safety. Note the asymmetry this task must encode: MCP `call_async` is the *Codex* path and the Claude fallback; a Claude caller's preferred path is `bridge call` run as a background Bash command, which the harness wakes on directly.
 
-**Scope (TDD):** tests first for: worker forked into its own process group with pid + metadata in `calls/<call_id>.json`; on completion, result appended to transcript and delivered to the *caller* via the ringer (spool for a Claude caller, `codex queue` for a Codex caller); `delivery` field wording matches the caller's family honestly; hard 10-minute wall-clock self-limit; state file cleanup on completion; stale-worker detection logic (consumed by `bridge doctor` in Task 10). Fake shims simulate slow and hung callees.
+**Scope (TDD):** tests first for: worker forked into its own process group with pid + metadata in `calls/<call_id>.json`; on completion, result appended to transcript and delivered to the *caller* via the ringer (spool for a Claude caller, `codex queue` for a Codex caller); `delivery` field wording matches the caller's family honestly and states *when* the answer will land (next turn start vs queue drain); hard 10-minute wall-clock self-limit; state file cleanup on completion; stale-worker detection logic (consumed by `bridge doctor` in Task 10). Fake shims simulate slow and hung callees.
 
-**Files:** `src/bridge/async_call.py`, `tests/test_async_call.py`.
+Also in scope: the `bridge call` **CLI** path must be usable standalone as a foreground blocking command that prints the structured answer to stdout — this is what a Claude caller backgrounds via Bash, so it must work without any MCP involvement.
+
+**Files:** `src/bridge/async_call.py`, `src/bridge/cli.py`, `tests/test_async_call.py`.
 
 **Depends on:** Tasks 6, 7, 8.
 
@@ -144,7 +146,7 @@ Ordered, independently executable tasks. Within each task, tests are written bef
 
 **Why:** Spec §12: registration, hooks, permission allowlists, and guidance blocks are product, not docs. Without the allowlists, every call triggers an approval prompt and the product dies on contact.
 
-**Scope (TDD):** tests first against a sandboxed fake `$HOME`: `bridge install` registers the MCP server on both sides (`claude mcp add` via shim; `[mcp_servers.bridge]` written into `~/.codex/config.toml`), installs both hooks into `~/.claude/settings.json` (merging, not clobbering, existing hooks), writes `mcp__bridge__*` permission entries and the Codex trust entry (degrading to printed manual instructions on unrecognized schema), appends sentinel-fenced guidance blocks to `~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md`, is idempotent (second run changes nothing — assert byte-identical files), and reports every file touched. `bridge doctor`: checks all install legs, registry writability, CLI flag availability (spec §16.2), and reaps orphaned async workers.
+**Scope (TDD):** tests first against a sandboxed fake `$HOME`: `bridge install` registers the MCP server on both sides (`claude mcp add` via shim; `[mcp_servers.bridge]` written into `~/.codex/config.toml`), installs both hooks into `~/.claude/settings.json` (merging, not clobbering, existing hooks), writes `mcp__bridge__*` permission entries and the Codex trust entry (degrading to printed manual instructions on unrecognized schema), appends sentinel-fenced guidance blocks to `~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md` — **family-specific, not identical**: the Claude block tells the agent to background `bridge call` via Bash for non-blocking consults, while the Codex block points at the `call_async` tool instead (spec §8/§12); assert the two blocks differ in exactly this respect — is idempotent (second run changes nothing — assert byte-identical files), and reports every file touched. `bridge doctor`: checks all install legs, registry writability, CLI flag availability (spec §16.2), and reaps orphaned async workers.
 
 **Files:** `src/bridge/install.py`, `src/bridge/doctor.py`, `src/bridge/cli.py`, `tests/test_install.py`, `tests/test_doctor.py`.
 

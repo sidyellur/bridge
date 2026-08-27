@@ -131,7 +131,14 @@ Two distinct operations that must never be conflated:
 - **Warm resume** (`claude -p --resume <uuid>` / `codex exec resume <id>`) is used **only** where Experiments A/B prove it safe against a live session **and** the question genuinely needs the peer's in-flight reasoning. v1 exposes it as `call(..., warm: true)` only if the experiments pass; otherwise the parameter is absent and the spec's answer is "fresh-headless plus carbon copy" **[DECIDED HERE]**. Every warm resume replays the peer's full context — real tokens, real money — so it is never the default regardless of experiment outcome.
 - **A message** (`text`) needs no answer. It goes to the *live* session via the ringer (§9).
 
-**`call_async` mechanics** **[DECIDED HERE]**: the tool forks a detached worker process (own process group, pid recorded in `calls/<call_id>.json`) that runs the consult, appends the result to the transcript, and delivers the answer through the same ringer used for `text` — `codex queue` to a Codex caller, spool+hook to a Claude caller. Honest asymmetry, stated in the `delivery` field: Codex has no background wake-up, so a Codex caller sees the answer when its queue drains; a Claude caller sees it injected at its next turn start. For a Claude caller who wants a true wake-up, the guidance blocks document the alternative: run `bridge call --to <id> "<q>"` via the Bash tool with `run_in_background=true` — the harness re-invokes the agent when the subprocess exits. The MCP tool itself stays fire-and-forget.
+**`call_async` mechanics** **[DECIDED HERE]**: the tool forks a detached worker process (own process group, pid recorded in `calls/<call_id>.json`) that runs the consult, appends the result to the transcript, and delivers the answer through the same ringer used for `text` — `codex queue` to a Codex caller, spool+hook to a Claude caller.
+
+**The delivery paths are not equally good, and the guidance must lead with the better one.** An MCP tool cannot cause its host to wake up; only the host agent choosing a background subprocess can. So:
+
+- **A Claude caller should reach for the Bash form first**: run `bridge call --to <id> "<q>"` via the Bash tool with `run_in_background=true`. The harness re-invokes the agent the moment the subprocess exits, so the answer arrives *mid-flow*. The guidance block (§12) teaches this as the default async path for Claude, and the `call_async` tool description says so too.
+- **MCP `call_async` is the path for Codex**, which has no background wake-up regardless, and the fallback for a Claude caller that cannot use Bash.
+
+The distinction matters because MCP `call_async` delivers to a Claude caller at its **next turn start** — which is after the human types something next, potentially many minutes later. Filing the true-wake-up path as a mere alternative would make the default path the worse one, contradicting §3. The `delivery` field states, honestly and per family, how and when the answer will actually arrive.
 
 ## 9. Delivery & the carbon copy (the ringer, and the wax-replica problem)
 
@@ -177,6 +184,10 @@ Enforcement, not just persuasion **[DECIDED HERE]**: read-only Claude consults r
 4. **Writes the coordination block** into `~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md`, fenced with sentinel markers (`<!-- bridge:guidance:begin/end -->`) for idempotent re-runs **[DECIDED HERE]**:
 
    > Use bridge to **coordinate**, never to **retrieve**. Never dial for anything discoverable on disk — the peer's repo is local; read it. Dial when you need the peer's intent, in-flight plan, or a decision only it holds; to hand off work with context; or to announce a change that affects it. One call = one question; answer incoming calls from your existing context without dialing out. For shared scratch notes, use the shared scratchpad file, not a call.
+   >
+   > When you do not need the answer immediately, do not block: run `bridge call --to <id> "<question>"` as a **background Bash command**, and the answer will reach you the moment it is ready. Use the `call_async` tool only if you cannot run background commands.
+
+   The second paragraph is written into the Claude block only; the Codex block instead points at the `call_async` tool, since Codex has no background wake-up (§8).
 
    The anti-trigger sentence also appears in every MCP tool description (§7), since tool descriptions are what models actually weigh.
 5. `bridge install` is idempotent and reports every file it touched. `bridge doctor` verifies the whole installation (server registered both sides, hooks present, permissions present, registry writable) and reaps orphaned call workers.
