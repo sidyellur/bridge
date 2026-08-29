@@ -1,50 +1,56 @@
 # bridge
 
-**A phone system for AI coding agents.**
+**A phone system for live AI coding agents.**
 
-You run Claude Code in one terminal and Codex in another. Today, moving
-information between them means copy-pasting by hand. `bridge` lets them reach
-each other directly — over [MCP](https://modelcontextprotocol.io), from either
-side.
+You run Claude Code in one terminal and Codex in another. Today, moving information between them means copy-pasting by hand. `bridge` lets the exact live sessions reach each other directly.
 
-Two ways to reach an agent, borrowed from how people already talk to each other:
+- **text** — send an asynchronous message to another live agent.
+- **call** — ask another live agent a question and receive its answer.
 
-- **text** — fire-and-forget. Lands in the other agent's inbox and on its screen,
-  read on its own time.
-- **call** — you ask a question, the peer answers from its own workspace, you
-  continue.
+“Live” is a product guarantee: the addressed session handles the message with its current conversation context. Bridge does not substitute a fresh headless agent, a resumed snapshot, or another process in the same directory.
 
-## Why an adapter, not a message broker
+## How it works
 
-Both Claude Code and Codex already ship a working phone system — for their own
-family. `ListAgents`/`SendMessage` reach other Claude sessions; `codex agents`
-and `codex queue` reach other Codex sessions. Every session is addressable, and
-both CLIs can be invoked headlessly against a workspace.
+Bridge uses the vendors' live integration surfaces:
 
-What's missing is the **span between them**: Claude can't reach a Codex thread,
-and Codex can't reach a Claude session.
+- Claude receives calls through a two-way [Claude Code Channel](https://code.claude.com/docs/en/channels).
+- Codex sessions run on a Bridge-managed [Codex App Server](https://developers.openai.com/codex/app-server/), with the normal TUI attached remotely.
+- A small local Bridge router correlates calls, queues events while a peer is busy, pushes asynchronous answers back to the caller, and records an audit transcript.
 
-So `bridge` is not a switchboard and owns no message infrastructure. It joins
-two carriers that each already work — one MCP server, registered on both sides,
-translating a shared tool surface onto whichever native mechanism the target
-already provides. Session lifecycle, persistence, and delivery stay the
-vendors' problem.
+```text
+live Claude session ←→ Claude Channel ←→ Bridge router ←→ Codex App Server ←→ live Codex TUI
+```
 
-## Design principle
+Sessions are launched through wrappers so Bridge can guarantee identity and reachability:
 
-*Silent success is indistinguishable from failure in a tool whose entire job is
-presence.* Every operation leaves a visible trace in **both** terminals — a
-consult the peer never learns about is a call to a wax replica, not a
-conversation.
+```sh
+bridge claude
+bridge codex
+```
+
+An agent session opened outside those wrappers is not silently treated as callable. Bridge reports it as unmanaged or unreachable and explains how to resume it through Bridge.
+
+## Design principles
+
+- The addressed live session answers. No substitute agents.
+- Busy sessions queue inbound calls; Bridge does not steer unrelated active work.
+- Use Bridge to coordinate, never to retrieve information already available on disk.
+- Calls request answers and do not grant permission to edit files or run commands.
+- Offline means unreachable, never “answered by a snapshot.”
+- Hop, rate, queue, and timeout limits prevent agent loops and cost blowups.
 
 ## Status
 
-Early. Design in progress — see `docs/superpowers/specs/`.
+Design and implementation planning. The live transport experiments are the first release gate because Claude Channels and parts of Codex App Server are currently preview/experimental interfaces.
 
-## Install
+See:
 
-The distribution is published as `agent-bridge`; the command, import, and repo
-are all `bridge`.
+- [Design spec](docs/superpowers/specs/2026-08-26-bridge-design.md)
+- [V1 implementation plan](docs/superpowers/plans/2026-08-26-bridge-v1-plan.md)
+
+## Packaging
+
+The planned Python distribution is `agent-bridge`; the repo, import, and command are `bridge`. A small Channel adapter may ship alongside the Python core using the official MCP SDK.
 
 ## License
 
