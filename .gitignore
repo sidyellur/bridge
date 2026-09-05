@@ -19,3 +19,6 @@ htmlcov/
 
 # OS
 .DS_Store
+
+# Subagent worktrees (ephemeral, never commit)
+.claude/worktrees/

@@ -16,6 +16,7 @@ from bridge.launch import (
     build_codex_argv,
     build_identity_env,
     codex_final_message_fallback_enabled,
+    describe_channel_mode,
     load_claude_channel_args,
     resolve_binary,
     resolve_claude_session_id,
@@ -92,6 +93,23 @@ def test_codex_final_message_fallback_enabled_via_env():
         assert codex_final_message_fallback_enabled({"BRIDGE_CODEX_FINAL_FALLBACK": value}) is True
 
 
+def test_describe_channel_mode_unsupported_when_no_args():
+    assert "unsupported" in describe_channel_mode([]).lower()
+    assert "inbound-unreachable" in describe_channel_mode([])
+
+
+def test_describe_channel_mode_development():
+    line = describe_channel_mode(["--channels", "dev:bridge"])
+    assert "development" in line.lower()
+    assert "research preview" in line.lower()
+
+
+def test_describe_channel_mode_plugin():
+    line = describe_channel_mode(["--channels", "plugin:bridge@bridge-marketplace"])
+    assert "plugin" in line.lower()
+    assert "research preview" not in line.lower()
+
+
 def test_resolve_binary_env_override():
     env = {"BRIDGE_CLAUDE_BIN": "/opt/fake/claude", "PATH": "/nowhere"}
     assert resolve_binary("claude", env) == "/opt/fake/claude"
@@ -156,6 +174,77 @@ def test_run_wrapper_passes_identity_and_exit_code(paths, tmp_path, ids):
 # tests/test_codex_launch.py, which uses tests/fakes/codex_exe.py (a fake
 # `codex` binary that really binds the App Server socket) instead of the
 # plain single-mode capture exe used above.
+
+
+def test_run_wrapper_claude_prints_channel_mode_line(paths, tmp_path, ids, capsys):
+    capture = tmp_path / "cap.jsonl"
+    bindir = tmp_path / "bin"
+    make_capture_exe(bindir, "claude", capture)
+    (paths.home / "claude_channel_args.json").write_text(json.dumps(["--channels", "dev:bridge"]))
+
+    with RunningRouter(paths) as rr:
+        env = {"PATH": f"{bindir}", "BRIDGE_CLAUDE_BIN": str(bindir / "claude")}
+        run_wrapper(
+            "claude",
+            [],
+            paths=paths,
+            env=env,
+            new_id=ids.new,
+            ensure_running=lambda p: None,
+            connect=lambda paths, session_id, role: rr.client(session_id=session_id, role=role),
+            forward_signals=False,
+            print_address=True,
+        )
+    err = capsys.readouterr().err
+    assert "session address:" in err
+    assert "Claude Channel mode: development" in err
+
+
+def test_run_wrapper_claude_prints_unsupported_channel_line(paths, tmp_path, ids, capsys):
+    capture = tmp_path / "cap.jsonl"
+    bindir = tmp_path / "bin"
+    make_capture_exe(bindir, "claude", capture)
+    # No claude_channel_args.json written: unsupported by default.
+
+    with RunningRouter(paths) as rr:
+        env = {"PATH": f"{bindir}", "BRIDGE_CLAUDE_BIN": str(bindir / "claude")}
+        run_wrapper(
+            "claude",
+            [],
+            paths=paths,
+            env=env,
+            new_id=ids.new,
+            ensure_running=lambda p: None,
+            connect=lambda paths, session_id, role: rr.client(session_id=session_id, role=role),
+            forward_signals=False,
+            print_address=True,
+        )
+    err = capsys.readouterr().err
+    assert "Claude Channel mode: unsupported" in err
+    assert "inbound-unreachable" in err
+
+
+def test_run_wrapper_no_channel_line_when_print_address_false(paths, tmp_path, ids, capsys):
+    capture = tmp_path / "cap.jsonl"
+    bindir = tmp_path / "bin"
+    make_capture_exe(bindir, "claude", capture)
+    (paths.home / "claude_channel_args.json").write_text(json.dumps(["--channels", "dev:bridge"]))
+
+    with RunningRouter(paths) as rr:
+        env = {"PATH": f"{bindir}", "BRIDGE_CLAUDE_BIN": str(bindir / "claude")}
+        run_wrapper(
+            "claude",
+            [],
+            paths=paths,
+            env=env,
+            new_id=ids.new,
+            ensure_running=lambda p: None,
+            connect=lambda paths, session_id, role: rr.client(session_id=session_id, role=role),
+            forward_signals=False,
+            print_address=False,
+        )
+    err = capsys.readouterr().err
+    assert err == ""
 
 
 def test_run_wrapper_uses_spawn_injection(paths, ids):

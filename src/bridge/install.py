@@ -13,9 +13,12 @@ from __future__ import annotations
 
 import json
 import stat
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .claude_probe import ChannelMode, ChannelSupport, detect_channel_mode
+from .launch import CLAUDE_CHANNEL_ARGS_FILE
 from .paths import Paths
 from .router import read_token
 
@@ -54,7 +57,7 @@ class InstallReport:
     touched: list[Path] = field(default_factory=list)
     removed: list[Path] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
-    channel_mode: str = "development"
+    channel_mode: str = ""
     dry_run: bool = False
 
     def render(self) -> str:
@@ -83,6 +86,7 @@ def install(
     claude_home: Path,
     codex_home: Path,
     dry_run: bool = False,
+    probe: Callable[[], ChannelMode] | None = None,
 ) -> InstallReport:
     report = InstallReport(dry_run=dry_run)
 
@@ -122,11 +126,34 @@ def install(
         _upsert_block(agents_md, MD_BEGIN, MD_END, GUIDANCE)
     report.touched.extend([claude_md, agents_md])
 
-    # 6. Channel launch mode (research-preview development flag by default).
-    report.notes.append(
-        "Claude Channels are a research preview; the development launch flag is "
-        "used until the plugin is on an effective channel allowlist"
-    )
+    # 6. Channel launch mode: detect real support instead of assuming development.
+    mode = (probe or detect_channel_mode)()
+    report.channel_mode = mode.support.value
+    channel_args_path = paths.home / CLAUDE_CHANNEL_ARGS_FILE
+    if mode.support in (ChannelSupport.PLUGIN, ChannelSupport.DEVELOPMENT):
+        if not dry_run:
+            _write_channel_args(channel_args_path, mode.launch_args)
+        report.touched.append(channel_args_path)
+    if mode.support is ChannelSupport.PLUGIN:
+        report.notes.append(
+            f"Claude Channel mode: plugin (claude {mode.version or 'unknown'}); "
+            "launching with --channels plugin:bridge@<marketplace>"
+        )
+    elif mode.support is ChannelSupport.DEVELOPMENT:
+        report.notes.append(
+            "Claude Channel mode: development (research preview) "
+            f"(claude {mode.version or 'unknown'}); launching with the development "
+            "channel flag. Organization policy may still block inbound delivery; "
+            "run `bridge doctor` to check."
+        )
+    else:
+        detail = f" ({mode.detail})" if mode.detail else ""
+        report.notes.append(
+            "Claude channel unsupported"
+            f" (claude {mode.version or 'not found'}){detail}: this session will be "
+            "inbound-unreachable until Claude Code Channels are available. "
+            "Outbound Bridge tools still work."
+        )
     report.notes.append("no Claude prompt hooks installed")
     return report
 
@@ -227,6 +254,10 @@ def _remove_block(path: Path, begin: str, end: str) -> bool:
     new = pre + ("\n" if pre and post else "") + post
     path.write_text(new)
     return True
+
+
+def _write_channel_args(path: Path, args: list[str]) -> None:
+    path.write_text(json.dumps(list(args), indent=2) + "\n")
 
 
 def _remove(path: Path) -> None:

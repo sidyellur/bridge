@@ -105,6 +105,27 @@ def codex_final_message_fallback_enabled(env: dict[str, str] | None = None) -> b
     return env.get(CODEX_FINAL_FALLBACK_ENV, "").strip().lower() in ("1", "true", "yes")
 
 
+def describe_channel_mode(channel_args: Sequence[str]) -> str:
+    """One-line human summary of the Claude Channel launch mode implied by
+    ``channel_args`` (the contents of ``claude_channel_args.json``, per
+    :class:`bridge.claude_probe.ChannelMode`). Classifies from the args
+    themselves so the wrapper never re-probes the vendor binary on every
+    ``bridge claude`` launch."""
+    if not channel_args:
+        return "Claude Channel mode: unsupported; this session is inbound-unreachable"
+    from .claude_probe import DEV_ARG_MARKER, PLUGIN_ARG_MARKER
+
+    joined = " ".join(channel_args)
+    if PLUGIN_ARG_MARKER in joined:
+        return "Claude Channel mode: plugin"
+    if DEV_ARG_MARKER in joined:
+        return (
+            "Claude Channel mode: development (research preview; organization "
+            "policy may block inbound delivery)"
+        )
+    return "Claude Channel mode: custom"
+
+
 def resolve_binary(family: str, env: dict[str, str] | None = None) -> str:
     env = os.environ if env is None else env
     override = env.get(CLAUDE_BIN_ENV if family == "claude" else CODEX_BIN_ENV)
@@ -228,6 +249,8 @@ def run_wrapper(
 
     if print_address:
         print(f"[bridge] session address: {session_id}", file=sys.stderr)
+        if family == "claude":
+            print(f"[bridge] {describe_channel_mode(channel_args)}", file=sys.stderr)
 
     proc = spawn(argv, env=child_env)
     registry.mark(session_id, "idle")
