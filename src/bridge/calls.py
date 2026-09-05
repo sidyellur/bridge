@@ -127,6 +127,7 @@ def do_reply(router: Router, args: dict[str, Any], waiter: Any) -> tuple[str, An
         raise RouterError("not_active", f"call is {call.status}, cannot be replied to")
 
     router.store.record_answer(call_id, answer, blocked)
+    call = router.store.get_call(call_id)  # refresh with the recorded answer
     status = CALL_BLOCKED if blocked else CALL_ANSWERED
     router.store.record_event(
         KIND_CALL, status, from_id=caller, to_id=call.from_id, gist=_gist(answer), call_id=call_id
