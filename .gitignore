@@ -14,8 +14,8 @@ venv/
 .coverage
 htmlcov/
 
-# Local dial state (transcripts, contacts, spool)
-.dial/
+# Local Bridge state (router socket, token, db, transcripts)
+.bridge/
 
 # OS
 .DS_Store

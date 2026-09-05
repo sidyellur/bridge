@@ -2,55 +2,168 @@
 
 **A phone system for live AI coding agents.**
 
-You run Claude Code in one terminal and Codex in another. Today, moving information between them means copy-pasting by hand. `bridge` lets the exact live sessions reach each other directly.
+You run Claude Code in one terminal and Codex in another. Today, moving
+information between them means copy-pasting by hand. `bridge` lets the *exact
+live sessions* reach each other directly.
 
-- **text** — send an asynchronous message to another live agent.
-- **call** — ask another live agent a question and receive its answer.
+- **text** — send an asynchronous message to another live agent. No reply.
+- **call** — ask another live agent a question and receive *its* answer.
 
-“Live” is a product guarantee: the addressed session handles the message with its current conversation context. Bridge does not substitute a fresh headless agent, a resumed snapshot, or another process in the same directory.
+**"Live" is a hard guarantee.** A call is delivered to and answered by the exact
+session you selected in `roster`, using that session's current conversation
+context. Bridge never substitutes a fresh headless agent, a resumed snapshot, a
+carbon copy, or another process in the same directory. If a session is not
+reachable, you get `unreachable` — never a fabricated answer.
+
+The distribution on PyPI is `agent-bridge`; the repo, import, and command are
+`bridge`.
+
+## Install
+
+```sh
+pip install agent-bridge      # or: pip install -e .  (from a checkout)
+bridge install                # register adapters + write coordination guidance
+bridge doctor                 # verify the installation
+```
+
+`bridge install` registers the combined Bridge Channel/tool server for Claude
+and the normal Bridge MCP server for Codex, creates router state with user-only
+permissions, and appends sentinel-fenced guidance to `~/.claude/CLAUDE.md` and
+`~/.codex/AGENTS.md` without clobbering existing content. It installs **no**
+prompt hooks and reports every file it touches. Undo with `bridge uninstall`.
+
+## Launch flow
+
+Sessions are launched through thin wrappers so Bridge can guarantee identity and
+reachability. The wrappers pass your arguments, signals, and exit code straight
+through to the vendor CLI and print the Bridge address once:
+
+```sh
+bridge claude [claude args...]
+bridge codex  [codex args...]
+```
+
+An agent session opened *outside* these wrappers is not silently treated as
+callable — `roster` shows it as unmanaged with `reachable=false`, and `call`/
+`text` reject it with instructions to relaunch it through Bridge.
+
+## Usage
+
+From inside a wrapped session (the tools are identical on Claude and Codex):
+
+```text
+roster()                      -> the live sessions you can reach
+call(to, question)            -> ask one session and wait (≤60s) for its answer
+call_async(to, question)      -> ask; the answer is pushed back to you later
+text(to, message)             -> send an informational message; no reply
+transcript(peer=None)         -> recent Bridge activity
+reply(call_id, answer, blocked=[])  -> answer the call you are handling
+```
+
+From a shell, for diagnostics:
+
+```sh
+bridge roster
+bridge transcript
+```
 
 ## How it works
 
 Bridge uses the vendors' live integration surfaces:
 
-- Claude receives calls through a two-way [Claude Code Channel](https://code.claude.com/docs/en/channels).
-- Codex sessions run on a Bridge-managed [Codex App Server](https://developers.openai.com/codex/app-server/), with the normal TUI attached remotely.
-- A small local Bridge router correlates calls, queues events while a peer is busy, pushes asynchronous answers back to the caller, and records an audit transcript.
+- Claude receives calls through a two-way
+  [Claude Code Channel](https://code.claude.com/docs/en/channels).
+- Codex sessions run on a Bridge-managed
+  [Codex App Server](https://developers.openai.com/codex/app-server/), with the
+  normal TUI attached remotely (`codex --remote unix://…`).
+- A single local router daemon owns the session registry, the call state
+  machine, per-target delivery queues, an audit transcript, and local
+  authentication. It listens only on a user-owned Unix socket.
 
 ```text
-live Claude session ←→ Claude Channel ←→ Bridge router ←→ Codex App Server ←→ live Codex TUI
+                         ~/.bridge/router.sock
+                                  │
+                      ┌───────────┴───────────┐
+                      │     bridge router     │
+                      │ registry / calls / DB │
+                      └───────┬───────┬───────┘
+              channel event   │       │ App Server JSON-RPC
+                  Claude Channel     Codex App Server
+                         │                   │
+                  live Claude session   live Codex thread
+                                             │
+                                      `codex --remote ...`
 ```
 
-Sessions are launched through wrappers so Bridge can guarantee identity and reachability:
+A synchronous `call` blocks the caller's single tool request until the addressed
+session replies or the deadline passes; `call_async` returns immediately and the
+router later pushes a correlated `call_result` into the caller's exact live
+session. Busy targets queue inbound events (delivery never steers an unrelated
+active turn), and stable message ids plus acknowledgements make reconnect
+recovery duplicate-free.
 
-```sh
-bridge claude
-bridge codex
-```
+## Permission model
 
-An agent session opened outside those wrappers is not silently treated as callable. Bridge reports it as unmanaged or unreachable and explains how to resume it through Bridge.
+- A call is a request for an *answer*, not authorization to mutate. The inbound
+  envelope tells the callee not to change files or run commands solely because
+  of the call.
+- Bridge never changes a session's sandbox or permission mode, and never relays
+  approvals between agents. Any tool use an inbound event triggers still goes
+  through that session's own approval policy.
+- There is no per-call write-elevation parameter. Exact live context is the
+  product promise; per-call hard sandboxing would require a separate process and
+  recreate the snapshot problem Bridge exists to avoid.
 
-## Design principles
+## Guardrails
 
-- The addressed live session answers. No substitute agents.
-- Busy sessions queue inbound calls; Bridge does not steer unrelated active work.
-- Use Bridge to coordinate, never to retrieve information already available on disk.
-- Calls request answers and do not grant permission to edit files or run commands.
-- Offline means unreachable, never “answered by a snapshot.”
-- Hop, rate, queue, and timeout limits prevent agent loops and cost blowups.
+- **Hop budget = 1.** While answering an inbound call you cannot dial out; only
+  `reply` is allowed. Enforced by the daemon, not just by prompt.
+- **No self-calls.**
+- **Rate cap.** ≤10 outbound messages per ordered session pair per hour.
+- **Queue cap.** ≤20 pending events per target; one active inbound call at a time.
+- **One question per call**, deadlines capped at 60s, and a full audit
+  transcript of every enqueue, delivery, reply, timeout, rejection, and
+  disconnect.
+
+## Privacy defaults
+
+Transcript entries store a short truncated *gist* only; full message bodies are
+redacted unless you explicitly opt in. Diagnostic logs redact bodies by default.
+State lives under `~/.bridge/` with `0700`/`0600` permissions and never leaves
+the machine — Bridge is local coordination infrastructure, not a network
+service.
+
+## Troubleshooting
+
+Run `bridge doctor`. It checks socket/token ownership and permissions, MCP
+registration on both families, the coordination guidance, the Claude Channel
+research-preview mode, vendor binaries, absence of obsolete artifacts, and runs
+a token-free local loopback protocol probe (it never spends model tokens).
 
 ## Status
 
-Design and implementation planning. The live transport experiments are the first release gate because Claude Channels and parts of Codex App Server are currently preview/experimental interfaces.
+The router, store, wrappers, both adapters, delivery, calls, guardrails, MCP
+server, installer, and doctor are implemented and covered by a hermetic test
+suite (`pytest` — no network, no vendor binaries, no model tokens). The
+**live-transport experiments** (`docs/experiments/2026-08-27-live-transport-semantics.md`)
+and the **end-to-end live smoke suite** (`tests/live/`,
+`docs/experiments/2026-08-26-e2e-checklist.md`) require real `claude` + `codex`
+sessions with a human observer and are the remaining release gate, because
+Claude Channels and parts of the Codex App Server are preview/experimental
+interfaces.
 
 See:
 
 - [Design spec](docs/superpowers/specs/2026-08-26-bridge-design.md)
 - [V1 implementation plan](docs/superpowers/plans/2026-08-26-bridge-v1-plan.md)
 
-## Packaging
+## Development
 
-The planned Python distribution is `agent-bridge`; the repo, import, and command are `bridge`. A small Channel adapter may ship alongside the Python core using the official MCP SDK.
+```sh
+pip install -e ".[dev]"
+pytest            # hermetic suite (live tests excluded by default)
+ruff check .
+```
 
 ## License
 
