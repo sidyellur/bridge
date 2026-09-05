@@ -621,8 +621,68 @@ class Store:
             ).fetchall()
         return [_row_to_call(r) for r in rows]
 
+    # --- retention ----------------------------------------------------------
+    def prune(self, older_than_s: float) -> dict[str, int]:
+        """Drop state older than ``now - older_than_s``; return per-table counts.
+
+        The transcript and the rate counters are pure history and are cut by
+        timestamp. Calls are cut only when they are *resolved* (answered,
+        blocked, timed out, or unreachable) **and** hold no queued or delivered
+        queue entry: an unresolved call is live coordination state and an
+        undelivered event is still owed to its target, so neither is ever
+        removed no matter how old it is. A prunable call takes its ``messages``
+        and ``queue`` rows with it so no orphan can wedge a target's FIFO.
+        """
+        cutoff = self._now() - float(older_than_s)
+        counts = {"transcript": 0, "rate_events": 0, "calls": 0, "messages": 0, "queue": 0}
+        with self._lock:
+            cur = self._conn.execute("DELETE FROM transcript WHERE ts < ?", (cutoff,))
+            counts["transcript"] = max(cur.rowcount, 0)
+            cur = self._conn.execute("DELETE FROM rate_events WHERE ts < ?", (cutoff,))
+            counts["rate_events"] = max(cur.rowcount, 0)
+
+            rows = self._conn.execute(
+                """
+                SELECT c.call_id FROM calls c
+                WHERE c.status IN (?, ?, ?, ?)
+                  AND c.created_at < ?
+                  AND NOT EXISTS (
+                      SELECT 1 FROM queue q
+                      JOIN messages m ON m.message_id = q.message_id
+                      WHERE m.call_id = c.call_id AND q.status IN (?, ?)
+                  )
+                """,
+                (
+                    CALL_ANSWERED,
+                    CALL_BLOCKED,
+                    CALL_TIMEOUT,
+                    CALL_UNREACHABLE,
+                    cutoff,
+                    MSG_QUEUED,
+                    MSG_DELIVERED,
+                ),
+            ).fetchall()
+            for chunk in _chunked([r["call_id"] for r in rows], 400):
+                marks = ",".join("?" * len(chunk))
+                cur = self._conn.execute(
+                    "DELETE FROM queue WHERE message_id IN"
+                    f" (SELECT message_id FROM messages WHERE call_id IN ({marks}))",
+                    chunk,
+                )
+                counts["queue"] += max(cur.rowcount, 0)
+                cur = self._conn.execute(f"DELETE FROM messages WHERE call_id IN ({marks})", chunk)
+                counts["messages"] += max(cur.rowcount, 0)
+                cur = self._conn.execute(f"DELETE FROM calls WHERE call_id IN ({marks})", chunk)
+                counts["calls"] += max(cur.rowcount, 0)
+        return counts
+
 
 # --- row helpers -----------------------------------------------------------
+
+
+def _chunked(values: list[str], size: int) -> list[list[str]]:
+    """Split ids into batches that stay well inside SQLite's parameter limit."""
+    return [values[i : i + size] for i in range(0, len(values), size)]
 
 
 def _table_exists(conn: sqlite3.Connection, name: str) -> bool:

@@ -34,7 +34,9 @@ _MAX_BODY = 8000
 
 def do_call(router: Router, args: dict[str, Any], waiter: Any) -> tuple[str, Any]:
     from_id = require_field(args, "caller")
-    to_id = require_field(args, "to")
+    # Aliases resolve before any guardrail runs, so every check, transcript row,
+    # and rate counter downstream sees the real session id.
+    to_id = router.resolve_target(require_field(args, "to"))
     question = str(require_field(args, "question"))[:_MAX_BODY]
     timeout_s = min(
         int(args.get("timeout_s", router.config.timeout_cap_s)), router.config.timeout_cap_s
@@ -67,7 +69,7 @@ def do_call(router: Router, args: dict[str, Any], waiter: Any) -> tuple[str, Any
 
 def do_call_async(router: Router, args: dict[str, Any], waiter: Any) -> tuple[str, Any]:
     from_id = require_field(args, "caller")
-    to_id = require_field(args, "to")
+    to_id = router.resolve_target(require_field(args, "to"))
     question = str(require_field(args, "question"))[:_MAX_BODY]
     now = router._now()
     deadline = now + router.config.timeout_cap_s
