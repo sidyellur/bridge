@@ -1,11 +1,52 @@
 # bridge v1 — implementation plan
 
 Date: 2026-08-26
+Revised: 2026-09-05
 Spec: `docs/superpowers/specs/2026-08-26-bridge-design.md`
 
 This plan implements true live-session communication. A Bridge call is delivered to and answered by the exact addressed Claude or Codex session. No task may introduce a headless, snapshot, warm-resume, spool, or carbon-copy fallback.
 
-Tasks are ordered by dependency and use tests before implementation. Tasks 1 and 2 can run in parallel; the vendor-adapter tasks are gated by Task 1 verdicts.
+Tasks are ordered by dependency and use tests before implementation. Run Task 1 first; begin scaffold and router implementation only after its required guarantees pass. Numbered tasks describe the eventual v1, but the milestone slices below govern execution order.
+
+## Delivery milestones and spec reconciliation
+
+This revision changes the original spec's scheduling, reply lifecycle, result schemas, and tool guidance. For those topics the explicit contracts below supersede spec §§6–10 for this implementation plan. Reconcile those spec sections as a follow-up documentation task before implementation; do not silently implement the old conflicting rules.
+
+### Milestone A — transport proof
+
+Complete Task 1 with disposable experiment scripts and minimal transport probes, not the production router. Record evidence for both actual TUIs, exact session identity, safe readiness/turn completion, and disconnect ambiguity. A failed mandatory guarantee blocks its adapter. No amount of fake-peer testing substitutes for this proof.
+
+### Milestone B — private async alpha
+
+Implement only the following slices of Tasks 2–9 and 11:
+- Minimal package, authenticated local router, managed wrappers, roster, and both proven live adapters.
+- Bounded FIFO, stable event IDs, explicit deadlines and failure outcomes, validated reply ownership, hop/rate limits, and visible exchanges.
+- Agent tools: exactly `roster`, `call_async`, and `reply`. Deliver asynchronous results to the exact initiating session after its turn finishes. Do not implement synchronous waiting yet.
+- Basic redacted lifecycle diagnostics and token-free health checks. Use temporary/manual configuration with documented undo steps; preserve existing user settings.
+- Fail closed on restart/disconnect; never automatically replay an event whose vendor acceptance is uncertain. Durable recovery and a user-facing transcript are not alpha prerequisites.
+- A small live end-to-end suite: both call directions, busy peers, reciprocal async requests, wrong-owner replies, reply-before-turn-end, expiry, and disconnect uncertainty.
+
+In-memory alpha state is acceptable. A router restart must explicitly invalidate outstanding requests through adapter connection loss and a changed router epoch; never report success or silently replay them. If an accepted result cannot be pushed after restart, report its outcome as unknown in session diagnostics. Persistent recovery belongs to Milestone C.
+
+Use the alpha in at least five real coding sessions before expanding scope. Record manual relays avoided, correct-peer selection, question-to-answer latency (including queue time), timeouts, and human interventions, without retaining private message bodies by default. Proceed only if repeat use reduces coordination work; otherwise revise the workflow before adding features.
+
+### Milestone C — v1 hardening
+
+Complete the remaining task slices: SQLite durability and conservative recovery, synchronous calls with wait-cycle protection, standalone text, user-facing transcript, robust reconnect, installer/uninstaller migration, full doctor, complete live suite, and packaging. Do not make these prerequisites for trying the private alpha.
+
+## Required protocol and scheduling contracts
+
+- **Answer completion and turn completion are separate.** A valid `reply` resolves the caller but does not release the callee's queue or outbound-message guard. Release those only on a correlated vendor turn-completion/safe-idle signal proven in E–G. Timeout likewise does not imply that the callee stopped working.
+- **Idle observations are not reservations.** Test a human starting a turn between the router's idle check and vendor submission. Use proven vendor serialization/rejection semantics; requeue only when non-acceptance is known. Never steer or overlap an unrelated turn.
+- **No exactly-once claim without vendor evidence.** Track queued, submitting, accepted, and processed separately. If a connection fails after possible acceptance but before acknowledgment, report `delivery_uncertain`; do not blindly retry. Stable router IDs prevent local duplicate enqueue/completion but do not prove vendor deduplication. Replay only after E–H establish a reliable vendor idempotency or reconciliation mechanism.
+- **Synchronous calls are a later convenience.** Before enabling them, atomically maintain a wait-for graph. Reject a call that creates a wait cycle with `would_deadlock` before enqueueing it, suggesting `call_async`. Remove wait edges on reply, rejection, timeout, or disconnect. Test simultaneous reciprocal calls and a three-session cycle; the inbound hop guard alone cannot prevent either.
+- **Canonical outcome shape.** Every operation returns `status` and a stable ID once accepted, plus `reason` for failures. Use `rejected` with reasons `rate_limited`, `queue_full`, `self_call`, `hop_limit`, `would_deadlock`, or `invalid_request`. Include `retry_after_s` where meaningful. Offline/unmanaged targets return `unreachable`.
+- **Call outcomes.** Admission returns `queued`, `rejected`, or `unreachable`. Final outcomes are `answered`, `blocked`, `expired` (never submitted), `timeout` (accepted but no answer by deadline), `no_reply` (proven turn completion without reply), `delivery_uncertain`, or `unreachable` (known not delivered). A `submitting` event with ambiguous acceptance cannot be labeled expired or unreachable. Only actual answers carry `answered_by="live-session"`; unanswered outcomes have no fabricated answer.
+- **Deadlines.** `call_async(to, question, timeout_s=300)` validates a positive timeout capped at 900 seconds, starting at router admission and including queue time. Synchronous calls retain a 60-second cap. Use a monotonic clock while running; persisted recovery must account conservatively for elapsed wall time and clock changes. Late replies are rejected and logged without clearing an active turn guard.
+- **Result delivery has its own lifecycle.** An answered call can still have a queued/failed/uncertain result notification. Preserve the original outcome separately. Reserve a bounded result slot for each admitted async call at its source (20 pending result slots per session); return `rejected/queue_full` if none is available. Result notifications and `reply` do not consume the outbound request rate budget. Pending results expire after a documented 15-minute delivery window, releasing the reservation and surfacing a diagnostic.
+- **Text outcomes in v1.** Admission follows the same rejection shape; delivery records `queued`, `delivered`, `processed`, `expired`, `unreachable`, or `delivery_uncertain`. Define a 300-second default TTL. Do not call transport acceptance "processed".
+- **Tool guidance.** Use: “Read straightforward facts directly from disk; use Bridge for relevant peer findings, rationale, status, decisions, and coordination.” Asking which file/test matters is permitted; redundant bulk retrieval is discouraged. This replaces the absolute anti-retrieval sentence in the original spec.
+
 
 ## Conventions used by every task
 
@@ -22,12 +63,12 @@ Tasks are ordered by dependency and use tests before implementation. Tasks 1 and
 
 **Why:** Legacy CLI Experiments A–D are complete and recorded in spec §13. The revised architecture introduces four different questions: Claude Channels and Codex App Server establish the live transport, but their busy-session, multi-client, identity, and reconnect details must be pinned before adapter code is written.
 
-**Scope:** Run spec §14 exactly and record raw commands, installed versions, output, and one labeled `Verdict:` for each experiment in `docs/experiments/2026-08-27-live-transport-semantics.md`.
+**Scope:** Run spec §14 plus the scheduling and uncertain-delivery cases above and record raw commands, installed versions, output, and one labeled `Verdict:` for each experiment in `docs/experiments/2026-08-27-live-transport-semantics.md`.
 
 - E: Claude development Channel reaches the exact session, inherits `BRIDGE_SESSION_ID`, and returns a reply-tool call.
 - F: a remote Codex TUI and Bridge client share one App Server; thread identity, turn events, and final-message correlation are proven.
-- G: inbound delivery during unrelated active turns is serialized without accidental steering on both families.
-- H: router, channel, App Server, and TUI disconnect/reconnect behavior is pinned.
+- G: inbound delivery during unrelated active turns is serialized without accidental steering on both families; prove safe turn completion after an early reply, and test human-input races between idle detection and submission.
+- H: disconnect/reconnect behavior is pinned using a minimal router probe; test disconnect after vendor acceptance but before acknowledgment, record whether reconciliation is possible, and document conservative failure where it is not.
 
 If any experiment disproves the live-session contract, stop before implementing its adapter and revise the spec. Do not add a snapshot fallback.
 
@@ -35,7 +76,7 @@ If any experiment disproves the live-session contract, stop before implementing 
 
 **Depends on:** nothing. Requires live Claude and Codex sessions and a human observing both TUIs.
 
-**Verify:** `grep -c '^Verdict:' docs/experiments/2026-08-27-live-transport-semantics.md` prints `4`, and none of the four verdicts contains `TBD`.
+**Verify:** Four labeled verdicts E–H each include PASS/FAIL, exact versions/commands, observed session/thread identifiers, expected versus actual behavior, and raw output or human-observation evidence. All mandatory live identity, two-client visibility, reply correlation, busy serialization, turn completion, and disconnect-safety guarantees must PASS; FAIL/TBD blocks the dependent adapter. A missing optional final-message fallback is acceptable only when explicitly disabled. Review the evidence, not merely the verdict count.
 
 ---
 
@@ -54,7 +95,7 @@ If any experiment disproves the live-session contract, stop before implementing 
 
 **Files:** `pyproject.toml`, `src/bridge/__init__.py`, `src/bridge/cli.py`, `tests/conftest.py`, `tests/fakes/`, `tests/test_scaffold.py`.
 
-**Depends on:** nothing; parallel with Task 1.
+**Depends on:** Task 1 passing mandatory transport guarantees. Build protocol fakes from its captured evidence, not assumed vendor behavior.
 
 **Verify:** `pip install -e . && bridge --version && pytest tests/test_scaffold.py` succeeds with network disabled.
 
@@ -78,7 +119,7 @@ Then implement the router event loop and a typed client used by the CLI, MCP ser
 
 **Files:** `src/bridge/router.py`, `src/bridge/router_client.py`, `src/bridge/store.py`, `src/bridge/protocol.py`, `src/bridge/paths.py`, `tests/test_router.py`, `tests/test_store.py`, `tests/test_protocol.py`.
 
-**Depends on:** Task 2.
+**Depends on:** Tasks 1 and 2. Alpha implements only the minimal router slice; SQLite/restart recovery is Milestone C.
 
 **Verify:** `pytest tests/test_router.py tests/test_store.py tests/test_protocol.py` passes, including restart recovery and rejection of a wrong token.
 
@@ -141,7 +182,7 @@ Use the official TypeScript MCP SDK if Experiment E confirms that is required; o
 - remote-TUI attachment lifecycle and exact thread binding from App Server events;
 - event subscription for runtime status, turn start/completion, agent-message deltas, tool calls, and disconnects;
 - idle `turn/start` delivery; no `turn/steer` use in v1;
-- final-agent-message capture as an optional reply fallback only when Experiment F permits it;
+- final-agent-message capture for correlation diagnostics; optional reply fallback is Milestone C only and requires Experiment F evidence;
 - clean signal forwarding, child reaping, reconnect, and unsupported-version errors.
 
 Tests run solely against the fake App Server and fake TUI. Pin generated protocol fixtures to the supported Codex version instead of hand-writing drifting schemas.
@@ -164,8 +205,8 @@ Tests run solely against the fake App Server and fake TUI. Pin generated protoco
 - queue cap of 20 and explicit overflow result;
 - delivery only when the adapter reports safe readiness according to Experiment G;
 - Claude Channel delivery and Codex idle `turn/start` delivery;
-- statuses `queued`, `delivered`, `processed`, `expired`, and `unreachable`;
-- reconnect recovery without duplicate delivery, using stable message ids and acknowledgements;
+- canonical text/event states and explicit admission rejections from the required contracts above;
+- local deduplication using stable IDs, plus conservative vendor-boundary recovery: ambiguous acceptance produces `delivery_uncertain`, never unconditional resend;
 - `text` envelope semantics that expect no reply;
 - transcript events for every state transition.
 
@@ -184,22 +225,22 @@ Tests run solely against the fake App Server and fake TUI. Pin generated protoco
 **Scope (TDD):** implement:
 
 - deterministic safe call envelope from spec §7;
-- call lifecycle (`queued`, `delivered`, `answering`, `answered`, `timeout`, `unreachable`, `blocked`);
-- validated `reply` ownership, single completion, expiration, and `blocked` passthrough;
-- synchronous waiting capped at 60 seconds without killing or forking the live target;
-- Codex final-message fallback only if enabled by Experiment F, labeled in result metadata;
-- daemon-enforced hop budget while a session answers an inbound call;
+- call admission, delivery phase, final outcome, callee turn state, and result-notification state tracked separately according to the required contracts;
+- validated `reply` ownership, single answer completion, expiration, and `blocked` passthrough; an early reply/timeout never releases the callee queue or hop guard before correlated turn completion;
+- Milestone C only: synchronous waiting capped at 60 seconds, with atomic wait-cycle detection and cleanup, without killing or forking the live target; alpha uses asynchronous calls;
+- Milestone C only: Codex final-message fallback if enabled by Experiment F, labeled in result metadata; alpha requires explicit `reply` and reports `no_reply` on proven turn completion without it;
+- daemon-enforced hop budget for the full inbound turn, including work after an early reply or timeout;
 - no self-calls, 10/hour ordered-pair rate cap, one active inbound call per target, and no steer;
 - answer-only permission contract: remove `allow_writes`; Bridge never changes the target's sandbox or approves tools;
 - deterministic transcript gists with full bodies disabled by default.
 
-Tests must prove `answered_by="live-session"`, reject replies from the wrong session, and assert that no code path invokes `claude -p`, `codex exec`, resume, spool, or carbon-copy behavior.
+Tests must prove `answered_by="live-session"`, reject replies from the wrong session, and assert that no delivery path invokes `claude -p`, `codex exec`, resume, spool, or carbon-copy behavior. Managed wrapper startup/resume is distinct from substituting a session to answer a call.
 
 **Files:** `src/bridge/calls.py`, `src/bridge/guardrails.py`, `src/bridge/envelopes.py`, `tests/test_calls.py`, `tests/test_guardrails.py`.
 
 **Depends on:** Tasks 4 and 7; Experiments E–G.
 
-**Verify:** `pytest tests/test_calls.py tests/test_guardrails.py` passes, including wrong-owner reply, timeout/late reply, hop refusal, rate cap, and a source-level forbidden-fallback assertion.
+**Verify:** `pytest tests/test_calls.py tests/test_guardrails.py` passes, including wrong-owner reply, timeout/late reply, early reply followed by continued work, simultaneous reciprocal and three-session wait cycles (Milestone C), hop refusal, rate cap, and a forbidden-substitute assertion scoped to delivery paths (wrapper startup/resume remains allowed).
 
 ---
 
@@ -207,23 +248,23 @@ Tests must prove `answered_by="live-session"`, reject replies from the wrong ses
 
 **Why:** Both live agents need the same ergonomic tools, and `call_async` must wake the original caller through its live transport when the answer arrives.
 
-**Scope (TDD):** expose exactly `roster`, `call`, `call_async`, `text`, `transcript`, and protocol-facing `reply` over stdio MCP. Codex uses the normal Bridge MCP process; Claude adds the same tool handlers to its existing Channel process so no duplicate tool names are registered. Tests assert:
+**Scope (TDD):** alpha exposes exactly `roster`, `call_async`, and protocol-facing `reply`; Milestone C adds `call`, `text`, and `transcript` over stdio MCP. Codex uses the normal Bridge MCP process; Claude adds the same tool handlers to its existing Channel process so no duplicate tool names are registered. Tests assert:
 
-- exact schemas and result shapes from spec §6;
-- the anti-trigger sentence in every public tool description;
+- exact schemas and result shapes from the revised required contracts above, reconciling spec §6 before implementation;
+- the revised disk-versus-coordination guidance in applicable public tool descriptions;
 - source identity comes only from inherited `BRIDGE_SESSION_ID`, never model-provided arguments;
 - router authentication and disconnected-router errors;
 - `call_async` returns after atomic enqueue and later pushes `kind=call_result` to the exact caller via Claude Channel or Codex App Server FIFO;
-- caller disconnect, busy caller, duplicate result, expired call, and daemon restart behavior;
+- caller disconnect, busy caller, duplicate result, reserved result-slot overflow, expired call, missing reply, uncertain result delivery, and stage-appropriate daemon restart behavior;
 - inbound-call hop state rejects outbound messaging while leaving `reply` available.
 
 Then add equivalent CLI commands for human diagnostics: `bridge roster`, `bridge text`, `bridge call`, and `bridge transcript`. The CLI does not impersonate an agent session unless an explicit managed source id is supplied internally by a wrapper.
 
 **Files:** `src/bridge/server.py`, `src/bridge/async_results.py`, `src/bridge/cli.py`, `tests/test_server.py`, `tests/test_async_results.py`, `tests/test_cli.py`.
 
-**Depends on:** Tasks 3–8.
+**Depends on:** the stage-appropriate slices of Tasks 3–8; alpha does not depend on sync calls, text, persistent recovery, or a user-facing transcript.
 
-**Verify:** `pytest tests/test_server.py tests/test_async_results.py tests/test_cli.py` passes; stdio initialize + tools/list reports the six expected tools.
+**Verify:** `pytest tests/test_server.py tests/test_async_results.py tests/test_cli.py` passes; stdio initialize + tools/list reports three tools for alpha and six for v1; both agents see consistent outcome schemas.
 
 ---
 
@@ -236,7 +277,7 @@ Then add equivalent CLI commands for human diagnostics: `bridge roster`, `bridge
 - install/register the combined Bridge Channel/tool server for Claude and the normal Bridge MCP server for Codex;
 - configure the Claude Channel adapter and choose documented normal or development launch mode based on detected support;
 - create router state/token with mode `0700`/`0600` as appropriate;
-- append idempotent sentinel-fenced guidance to CLAUDE.md and AGENTS.md explaining wrapper use, exact live semantics, anti-retrieval, reply, and hop rules;
+- append idempotent sentinel-fenced guidance to CLAUDE.md and AGENTS.md explaining wrapper use, exact live semantics, direct-read/coordination guidance, reply, and full-turn hop rules;
 - install no Claude prompt hooks and remove only obsolete Bridge-owned hook/spool configuration from prior pre-release installs;
 - preserve unrelated settings byte-for-byte and report every touched path;
 - provide a reversible `bridge uninstall` that does not delete transcripts unless explicitly requested;
@@ -263,11 +304,15 @@ Then add equivalent CLI commands for human diagnostics: `bridge roster`, `bridge
 5. A call sent while the target is busy waits and does not steer the unrelated turn.
 6. The callee cannot dial out while answering; the 11th pair message is rate-limited.
 7. Killing either adapter changes roster reachability and returns `unreachable`, never a headless answer.
-8. Both human-visible transcripts and Bridge transcript agree on call id, sender, target, and outcome.
+8. Both human-visible transcripts and Bridge diagnostics/transcript agree on call id, sender, target, and outcome.
+9. An early reply followed by continued callee work does not release its FIFO or hop guard.
+10. Reciprocal async calls finish after original turns become idle; v1 synchronous reciprocal and three-session cycles return `would_deadlock` rather than mutually timing out.
+11. Disconnect after possible acceptance produces `delivery_uncertain` unless proven reconciliation resolves it, with no blind duplicate delivery.
+12. Human-input races preserve serialization; async result reservations, expiry, and undeliverable notifications surface explicit outcomes.
 
 **Files:** `tests/live/test_e2e.py`, `docs/experiments/2026-08-26-e2e-checklist.md`.
 
-**Depends on:** Tasks 1–10.
+**Depends on:** alpha slices of Tasks 1–9 for the initial live suite (manual setup permitted); Tasks 1–10 for the complete v1 suite. Run alpha tests before installer work.
 
 **Verify:** `pytest -m live tests/live/` passes and every human-observation checklist item is checked.
 
@@ -342,4 +387,4 @@ Every degrade path is explicit: policy-blocked Channel, unsupported App Server v
 
 ## Task order summary
 
-1 (experiments) and 2 (scaffold) in parallel → 3 (router) → 4 (wrappers/roster) → 5 (Claude Channel) and 6 (Codex App Server) → 7 (delivery FIFO/text) → 8 (live calls/guardrails) → 9 (MCP/async results) → 10 (install/doctor) → 11 (live E2E) → 12 (packaging/README).
+Task 1 transport proof → reconcile affected spec contracts → Task 2 → alpha slices of 3–4 → 5–6 → 7–9 async-only slices → Task 11 alpha live suite → five-session usage review → remaining Tasks 3–9 durability/sync/text/transcript work → Task 10 installer/doctor → Task 11 full live suite → Task 12 packaging. Never defer the first real two-terminal workflow until after installer and recovery infrastructure.
