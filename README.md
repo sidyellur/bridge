@@ -32,6 +32,31 @@ permissions, and appends sentinel-fenced guidance to `~/.claude/CLAUDE.md` and
 `~/.codex/AGENTS.md` without clobbering existing content. It installs **no**
 prompt hooks and reports every file it touches. Undo with `bridge uninstall`.
 
+### Channel modes
+
+`bridge install` runs a token-free probe (`claude --version` / `claude --help`,
+never a real turn) and writes the right `claude` launch flags for what it
+finds, instead of assuming a fixed mode:
+
+- **`plugin`** — your `claude` advertises a channel marketplace/allowlist. The
+  wrapper launches with `--channels plugin:bridge@<marketplace>`. This is the
+  fully-supported path; `bridge doctor` reports it `[ok]`.
+- **`development`** — `claude` only exposes the Channels *research-preview*
+  development flag. The wrapper still launches with the channel enabled, but
+  `bridge doctor` reports it `[warn]`: your organization's policy may still
+  reject inbound events even though the flag is accepted locally.
+- **`unsupported`** — no channel support was detected at all (old `claude`
+  version, or the binary isn't found). Bridge writes no channel flag; the
+  session launches normally but is **inbound-unreachable** — `call`/`text`
+  aimed at it return `unreachable`. Outbound Bridge tools from that session
+  still work. `bridge doctor` reports this `[fail]` so it isn't missed.
+
+`bridge claude` prints the detected mode to stderr once at startup, right
+after the session address. Re-run `bridge install` after upgrading `claude` to
+re-detect and pick up a better mode. `bridge doctor` also surfaces any
+organization-policy rejection a session recorded when it tried to negotiate
+the channel capability, under **Claude channel policy**.
+
 ## Launch flow
 
 Sessions are launched through thin wrappers so Bridge can guarantee identity and
@@ -136,9 +161,11 @@ service.
 ## Troubleshooting
 
 Run `bridge doctor`. It checks socket/token ownership and permissions, MCP
-registration on both families, the coordination guidance, the Claude Channel
-research-preview mode, vendor binaries, absence of obsolete artifacts, and runs
-a token-free local loopback protocol probe (it never spends model tokens).
+registration on both families, the coordination guidance, the detected Claude
+Channel mode (see [Channel modes](#channel-modes) above) and any persisted
+organization-policy rejection, vendor binaries, absence of obsolete artifacts,
+and runs a token-free local loopback protocol probe (it never spends model
+tokens).
 
 ## Status
 
