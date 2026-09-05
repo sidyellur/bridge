@@ -37,6 +37,10 @@ def pump_target(router: Router, target_id: str) -> None:
         return
     if session.state not in _DELIVERABLE_STATES:
         return
+    # While an inbound call is being answered, the target is occupied: nothing
+    # else is delivered until reply/timeout clears it. Busy is not interruptible.
+    if router.store.active_inbound_call(target_id) is not None:
+        return
 
     while True:
         item = router.store.next_queued(target_id)
@@ -44,9 +48,6 @@ def pump_target(router: Router, target_id: str) -> None:
             return
 
         if item.kind == KIND_CALL:
-            # One active inbound call at a time.
-            if router.store.active_inbound_call(target_id) is not None:
-                return
             event = call_event(
                 item.body["call_id"], item.body["from_preview"], item.body["question"]
             )
