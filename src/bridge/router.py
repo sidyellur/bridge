@@ -171,7 +171,15 @@ class Router:
         if "state" in args:
             self.store.set_state(session_id, args["state"])
         if "reachable" in args:
-            self.store.set_reachable(session_id, bool(args["reachable"]))
+            new_reachable = bool(args["reachable"])
+            if not new_reachable:
+                current = self.store.get_session(session_id)
+                if current is not None and current.reachable:
+                    # A real transition, e.g. a Codex App Server crash detected
+                    # by the adapter — record it exactly like a socket-level
+                    # disconnect so the transcript never shows a silent gap.
+                    self.store.record_event("session", "disconnected", to_id=session_id)
+            self.store.set_reachable(session_id, new_reachable)
         if "vendor_session_id" in args and args["vendor_session_id"]:
             self.store.set_vendor_session(session_id, args["vendor_session_id"])
         if "last_user_message" in args:
