@@ -151,8 +151,8 @@ class Router:
 
     # --- session registry ---------------------------------------------------
     def register_session(self, args: dict[str, Any]) -> dict[str, Any]:
-        session_id = _require(args, "session_id")
-        family = _require(args, "family")
+        session_id = require_field(args, "session_id")
+        family = require_field(args, "family")
         self.store.upsert_session(
             session_id,
             family,
@@ -167,7 +167,7 @@ class Router:
         return {"registered": True, "session_id": session_id}
 
     def update_state(self, args: dict[str, Any]) -> dict[str, Any]:
-        session_id = _require(args, "session_id")
+        session_id = require_field(args, "session_id")
         if "state" in args:
             self.store.set_state(session_id, args["state"])
         if "reachable" in args:
@@ -191,11 +191,11 @@ class Router:
         return {"ok": True}
 
     def heartbeat(self, args: dict[str, Any]) -> dict[str, Any]:
-        self.store.touch(_require(args, "session_id"))
+        self.store.touch(require_field(args, "session_id"))
         return {"ok": True}
 
     def deregister(self, args: dict[str, Any]) -> dict[str, Any]:
-        session_id = _require(args, "session_id")
+        session_id = require_field(args, "session_id")
         self.store.mark_offline(session_id)
         self.store.record_event("session", "offline", to_id=session_id)
         return {"ok": True}
@@ -306,7 +306,13 @@ class Router:
         return self._new_id()
 
 
-def _require(args: dict[str, Any], key: str) -> Any:
+def require_field(args: dict[str, Any], key: str) -> Any:
+    """Return ``args[key]`` or raise the router's standard bad_request error.
+
+    The single definition for every op handler, here and in the feature modules
+    (:mod:`bridge.calls`, :mod:`bridge.delivery`), so "missing required field"
+    means exactly one thing on the wire.
+    """
     if key not in args or args[key] in (None, ""):
         raise RouterError("bad_request", f"missing required field {key!r}")
     return args[key]

@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 
 from . import guardrails
 from .envelopes import call_event, preview, text_event
+from .router import require_field
 from .store import (
     CALL_DELIVERED,
     KIND_CALL,
@@ -23,6 +24,7 @@ from .store import (
     STATE_IDLE,
     STATE_WAITING,
 )
+from .transcript import gist
 
 if TYPE_CHECKING:
     from .router import Router
@@ -62,7 +64,7 @@ def pump_target(router: Router, target_id: str) -> None:
                 "delivered",
                 from_id=item.body.get("from_id"),
                 to_id=target_id,
-                gist=_gist(item.body.get("question", "")),
+                gist=gist(item.body.get("question", "")),
                 call_id=item.body["call_id"],
             )
             return  # occupy the target until reply/timeout
@@ -77,20 +79,20 @@ def pump_target(router: Router, target_id: str) -> None:
             "delivered",
             from_id=item.body.get("from_id"),
             to_id=target_id,
-            gist=_gist(item.body.get("gist", "")),
+            gist=gist(item.body.get("gist", "")),
             call_id=item.body.get("call_id"),
         )
 
 
 def do_text(router: Router, args: dict[str, Any]) -> dict[str, Any]:
-    from_id = _require(args, "caller")
-    to_id = _require(args, "to")
+    from_id = require_field(args, "caller")
+    to_id = require_field(args, "to")
     message = str(args.get("message", ""))[:_MAX_BODY]
 
     guardrails.outbound_precheck(router, from_id, to_id)
     if not guardrails.target_connected(router, to_id):
         router.store.record_event(
-            KIND_TEXT, MSG_UNREACHABLE, from_id=from_id, to_id=to_id, gist=_gist(message)
+            KIND_TEXT, MSG_UNREACHABLE, from_id=from_id, to_id=to_id, gist=gist(message)
         )
         return {"message_id": "", "status": MSG_UNREACHABLE, "note": "target is not reachable"}
 
@@ -107,7 +109,7 @@ def do_text(router: Router, args: dict[str, Any]) -> dict[str, Any]:
         "queued",
         from_id=from_id,
         to_id=to_id,
-        gist=_gist(message),
+        gist=gist(message),
         body={"message": message},
     )
     pump_target(router, to_id)
@@ -119,7 +121,7 @@ def do_text(router: Router, args: dict[str, Any]) -> dict[str, Any]:
 
 def do_ack(router: Router, args: dict[str, Any]) -> dict[str, Any]:
     """An adapter acknowledges that a delivered event was absorbed."""
-    message_id = _require(args, "message_id")
+    message_id = require_field(args, "message_id")
     item = router.store.get_queued(message_id)
     if item is None:
         return {"ok": False, "note": "unknown message id"}
@@ -129,19 +131,6 @@ def do_ack(router: Router, args: dict[str, Any]) -> dict[str, Any]:
 
 
 _MAX_BODY = 8000
-
-
-def _gist(text: str) -> str:
-    text = text.strip().replace("\n", " ")
-    return text[:120]
-
-
-def _require(args: dict[str, Any], key: str) -> Any:
-    from .router import RouterError
-
-    if key not in args or args[key] in (None, ""):
-        raise RouterError("bad_request", f"missing required field {key!r}")
-    return args[key]
 
 
 def _register() -> None:

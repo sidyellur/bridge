@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 
 from . import guardrails
 from .envelopes import preview
+from .router import require_field
 from .store import (
     CALL_ANSWERED,
     CALL_ANSWERING,
@@ -23,6 +24,7 @@ from .store import (
     CALL_UNREACHABLE,
     KIND_CALL,
 )
+from .transcript import gist
 
 if TYPE_CHECKING:
     from .router import Router
@@ -31,9 +33,9 @@ _MAX_BODY = 8000
 
 
 def do_call(router: Router, args: dict[str, Any], waiter: Any) -> tuple[str, Any]:
-    from_id = _require(args, "caller")
-    to_id = _require(args, "to")
-    question = str(_require(args, "question"))[:_MAX_BODY]
+    from_id = require_field(args, "caller")
+    to_id = require_field(args, "to")
+    question = str(require_field(args, "question"))[:_MAX_BODY]
     timeout_s = min(
         int(args.get("timeout_s", router.config.timeout_cap_s)), router.config.timeout_cap_s
     )
@@ -52,7 +54,7 @@ def do_call(router: Router, args: dict[str, Any], waiter: Any) -> tuple[str, Any
             CALL_UNREACHABLE,
             from_id=from_id,
             to_id=to_id,
-            gist=_gist(question),
+            gist=gist(question),
             call_id=call_id,
         )
         return ("respond", _result(router, call_id, CALL_UNREACHABLE, "", [], now, None))
@@ -64,9 +66,9 @@ def do_call(router: Router, args: dict[str, Any], waiter: Any) -> tuple[str, Any
 
 
 def do_call_async(router: Router, args: dict[str, Any], waiter: Any) -> tuple[str, Any]:
-    from_id = _require(args, "caller")
-    to_id = _require(args, "to")
-    question = str(_require(args, "question"))[:_MAX_BODY]
+    from_id = require_field(args, "caller")
+    to_id = require_field(args, "to")
+    question = str(require_field(args, "question"))[:_MAX_BODY]
     now = router._now()
     deadline = now + router.config.timeout_cap_s
 
@@ -82,7 +84,7 @@ def do_call_async(router: Router, args: dict[str, Any], waiter: Any) -> tuple[st
             CALL_UNREACHABLE,
             from_id=from_id,
             to_id=to_id,
-            gist=_gist(question),
+            gist=gist(question),
             call_id=call_id,
         )
         return (
@@ -104,8 +106,8 @@ def do_call_async(router: Router, args: dict[str, Any], waiter: Any) -> tuple[st
 def do_reply(router: Router, args: dict[str, Any], waiter: Any) -> tuple[str, Any]:
     from .router import RouterError
 
-    caller = _require(args, "caller")
-    call_id = _require(args, "call_id")
+    caller = require_field(args, "caller")
+    call_id = require_field(args, "call_id")
     answer = str(args.get("answer", ""))[:_MAX_BODY]
     blocked = [str(b) for b in (args.get("blocked") or [])]
     via = str(args.get("via", "tool"))
@@ -129,7 +131,7 @@ def do_reply(router: Router, args: dict[str, Any], waiter: Any) -> tuple[str, An
     call = router.store.get_call(call_id)  # refresh with the recorded answer
     status = CALL_BLOCKED if blocked else CALL_ANSWERED
     router.store.record_event(
-        KIND_CALL, status, from_id=caller, to_id=call.from_id, gist=_gist(answer), call_id=call_id
+        KIND_CALL, status, from_id=caller, to_id=call.from_id, gist=gist(answer), call_id=call_id
     )
     result = _result(
         router,
@@ -211,7 +213,7 @@ def _enqueue_call(
         "queued",
         from_id=from_id,
         to_id=to_id,
-        gist=_gist(question),
+        gist=gist(question),
         call_id=call_id,
         body={"question": question},
     )
@@ -248,18 +250,6 @@ def _result(
             "via": via,
         },
     }
-
-
-def _gist(text: str) -> str:
-    return text.strip().replace("\n", " ")[:120]
-
-
-def _require(args: dict[str, Any], key: str) -> Any:
-    from .router import RouterError
-
-    if key not in args or args[key] in (None, ""):
-        raise RouterError("bad_request", f"missing required field {key!r}")
-    return args[key]
 
 
 def _register() -> None:
