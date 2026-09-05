@@ -46,6 +46,9 @@ from .store import (
     Store,
 )
 
+# Selector key marking the stop() wake-up socket (see RouterServer.serve_forever).
+_WAKE = object()
+
 
 class RouterError(Exception):
     def __init__(self, code: str, message: str) -> None:
@@ -503,6 +506,11 @@ class RouterServer:
         self._running = False
         self._last_active_ts = now()
         self._now = now
+        # Self-pipe so stop() wakes the selector immediately instead of waiting
+        # out the poll timeout; a stopped router must never answer a late request.
+        self._wake_r, self._wake_w = socket.socketpair()
+        self._wake_r.setblocking(False)
+        self._wake_w.setblocking(False)
 
     # --- setup --------------------------------------------------------------
     def _bind(self) -> None:
@@ -516,6 +524,7 @@ class RouterServer:
         listener.setblocking(False)
         self._listener = listener
         self._sel.register(listener, selectors.EVENT_READ, data=None)
+        self._sel.register(self._wake_r, selectors.EVENT_READ, data=_WAKE)
         self.paths.pidfile.write_text(str(os.getpid()))
 
     def serve_forever(self) -> None:
@@ -523,8 +532,14 @@ class RouterServer:
         self._running = True
         while self._running:
             events = self._sel.select(timeout=1.0)
+            if not self._running:
+                # stop() raced the poll: do not service (and answer) anything
+                # that arrived alongside the wake-up. A stopped router is silent.
+                break
             for key, mask in events:
-                if key.data is None:
+                if key.data is _WAKE:
+                    self._drain_wake()
+                elif key.data is None:
                     self._accept()
                 else:
                     self._service(key.data, mask)
@@ -533,10 +548,30 @@ class RouterServer:
 
     def stop(self) -> None:
         self._running = False
+        try:
+            self._wake_w.send(b"x")
+        except OSError:
+            pass
+
+    def _drain_wake(self) -> None:
+        try:
+            while self._wake_r.recv(64):
+                pass
+        except (BlockingIOError, OSError):
+            pass
 
     def shutdown(self) -> None:
         for conn in list(self._conns.values()):
             self._close_conn(conn)
+        for s in (self._wake_r, self._wake_w):
+            try:
+                self._sel.unregister(s)
+            except (KeyError, ValueError):
+                pass
+            try:
+                s.close()
+            except OSError:
+                pass
         if self._listener is not None:
             self._sel.unregister(self._listener)
             self._listener.close()
