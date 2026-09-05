@@ -355,8 +355,11 @@ class _Conn:
     authed: bool = False
     session_id: str | None = None
     role: str = "client"
+    on_frame: Callable[[str, str, dict[str, Any]], None] | None = None
 
     def queue(self, frame: dict[str, Any]) -> None:
+        if self.on_frame is not None:
+            self.on_frame("router", "out", frame)
         self.outbound.extend(encode_frame(frame))
 
 
@@ -394,9 +397,16 @@ class RouterServer:
         new_id: Callable[[], str] | None = None,
         config: RouterConfig | None = None,
         token: str | None = None,
+        on_frame: Callable[[str, str, dict[str, Any]], None] | None = None,
     ) -> None:
         self.paths = paths.ensure()
         self.config = config or RouterConfig()
+        # Opt-in `bridge lab` wire capture; see :mod:`bridge.lab.capture`.
+        if on_frame is None and os.environ.get("BRIDGE_LAB_CAPTURE"):
+            from .lab.capture import hook_from_env
+
+            on_frame = hook_from_env()
+        self._on_frame = on_frame
         self.token = token or _read_or_create_token(paths)
         self.router = Router.create(
             paths, now=now, new_id=new_id, notifier=None, config=self.config
@@ -458,7 +468,7 @@ class RouterServer:
         assert self._listener is not None
         sock, _ = self._listener.accept()
         sock.setblocking(False)
-        conn = _Conn(sock=sock)
+        conn = _Conn(sock=sock, on_frame=self._on_frame)
         self._conns[sock.fileno()] = conn
         self._sel.register(sock, selectors.EVENT_READ, data=conn)
 
@@ -510,6 +520,8 @@ class RouterServer:
             self._sel.modify(conn.sock, selectors.EVENT_READ, data=conn)
 
     def _handle_frame(self, conn: _Conn, frame: dict[str, Any]) -> None:
+        if self._on_frame is not None:
+            self._on_frame("router", "in", frame)
         if frame.get("t") != "req":
             return
         req_id = frame.get("id")
