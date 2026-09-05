@@ -9,9 +9,10 @@ send requests, and push notifications, which is what a two-way channel needs.
 from __future__ import annotations
 
 import json
+import os
 import socket
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any
 
 
@@ -42,6 +43,8 @@ class _Pending:
 
 MethodHandler = Callable[[dict[str, Any]], Any]
 NotificationHandler = Callable[[dict[str, Any]], None]
+#: ``on_frame(source, direction, obj)`` -- see :mod:`bridge.lab.capture`.
+FrameHook = Callable[[str, str, Mapping[str, Any]], None]
 
 
 class RpcEndpoint:
@@ -51,10 +54,18 @@ class RpcEndpoint:
         *,
         name: str = "",
         on_close: Callable[[], None] | None = None,
+        on_frame: FrameHook | None = None,
     ) -> None:
         self._sock = sock
         self._name = name
         self._on_close = on_close
+        # Opt-in `bridge lab` wire capture. Unset -> a single dict lookup and no
+        # hook, so the endpoint pays nothing and writes nothing.
+        if on_frame is None and os.environ.get("BRIDGE_LAB_CAPTURE"):
+            from .lab.capture import hook_from_env
+
+            on_frame = hook_from_env()
+        self._on_frame = on_frame
         self._buf = bytearray()
         self._methods: dict[str, MethodHandler] = {}
         self._notifications: dict[str, NotificationHandler] = {}
@@ -101,6 +112,8 @@ class RpcEndpoint:
 
     # --- internals ----------------------------------------------------------
     def _send(self, obj: dict[str, Any]) -> None:
+        if self._on_frame is not None:
+            self._on_frame(self._name, "out", obj)
         data = json.dumps(obj, separators=(",", ":")).encode("utf-8") + b"\n"
         with self._send_lock:
             try:
@@ -138,6 +151,8 @@ class RpcEndpoint:
             msg = json.loads(line)
         except json.JSONDecodeError:
             return
+        if self._on_frame is not None:
+            self._on_frame(self._name, "in", msg)
         if "method" in msg and "id" in msg:
             self._handle_request(msg)
         elif "method" in msg:

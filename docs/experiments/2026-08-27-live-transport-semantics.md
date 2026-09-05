@@ -28,6 +28,65 @@ package installed (`pip install -e .` then `bridge install`):
 3. Replace the `Verdict:` line with a one-line PASS/FAIL plus the decisive
    evidence. Do not leave `TBD`.
 
+### Running with `bridge lab`
+
+`bridge lab` is the harness for this document. It does not decide anything —
+it records versions, fires each experiment's stimulus through the running
+router, captures both directions of the live wire traffic, and shows you what
+it saw. **You** read the two TUIs and write the verdict.
+
+```sh
+# 1. Open a run: records `claude --version`, `codex --version`, `bridge
+#    --version`, gates on `bridge doctor` (a FAIL refuses to proceed), and
+#    creates docs/experiments/runs/<UTC timestamp>/ with versions.json and one
+#    capture target per experiment.
+bridge lab prepare               # add --full to keep message bodies verbatim
+
+# 2. Export the capture directory it printed in EVERY terminal that will host a
+#    session, BEFORE launching the vendor, so the adapters and the router write
+#    their frames into the run.
+export BRIDGE_LAB_CAPTURE=/abs/path/to/docs/experiments/runs/<stamp>
+bridge claude                    # terminal 1
+bridge codex                     # terminal 2
+
+# 3. Run each experiment from a third terminal. Session ids come from
+#    `bridge roster`, or pass them explicitly.
+bridge lab run E --claude <claude-session-id>
+bridge lab run F --codex  <codex-session-id>
+bridge lab run G --codex  <codex-session-id>    # then again with --claude
+bridge lab run H --claude <id> --codex <id>
+
+# 4. Record what you observed. `TBD` is refused; the run directory is linked.
+bridge lab verdict E PASS "envelope reached claude-…, reply(call_id) returned"
+
+# 5. The Task 1 verify, as an exit code.
+bridge lab report
+```
+
+What each `run` does:
+
+| | stimulus | success signal |
+|---|---|---|
+| `E` | delivers a `[bridge call]` envelope to the named Claude session | a `notifications/claude/channel` frame carrying that `call_id` **and** a recorded `reply` |
+| `F` | causes a `turn/start` on the bound Codex thread | `turn/started` → `turn/completed` correlated through the `turn_id` the `turn/start` response returned |
+| `G` | holds a `text` while the target reports `working`, then watches for delivery on idle | admission `queued`, delivery after idle, and **zero** `turn/steer` frames in the capture (a hard failure if any appears) |
+| `H` | scripted "now kill *component*, press Enter" prompts | the roster `reachable` transition plus the transcript delta (queued/expired/timeout deadlines) for each step |
+
+Capture notes:
+
+* Traffic capture is strictly opt-in. With `BRIDGE_LAB_CAPTURE` unset nothing is
+  hooked, opened, or written.
+* Message bodies (`text`, `message`, `question`, `answer`) are redacted to
+  `<redacted:N chars>` so a capture can be pasted here; routing metadata
+  (`call_id`, `thread_id`, `turn_id`, `kind`, `from`) is preserved. Pass
+  `bridge lab prepare --full` (and export `BRIDGE_LAB_CAPTURE_FULL=1`) when a
+  verdict genuinely needs the bodies.
+* Each `bridge lab run X` writes the frames it observed plus a summary record to
+  `<run>/X.jsonl`. Cite that path in the verdict.
+
+`bridge lab` never issues `turn/steer`, never resumes a session, and never
+writes a verdict of its own.
+
 ---
 
 ## Experiment E — Claude Channel delivery and reply

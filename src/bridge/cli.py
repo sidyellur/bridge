@@ -88,6 +88,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_serve = sub.add_parser("serve", help="run the Bridge MCP tool server over stdio (internal)")
     p_serve.add_argument("--family", choices=["claude", "codex"], default="codex")
 
+    # --- BEGIN bridge lab subparser (live-transport Experiments E-H) -------
+    # Kept as one self-contained block at the end of the subparser section so
+    # other subcommands can be added above it without a merge conflict.
+    from .lab.cli import add_lab_parser
+
+    add_lab_parser(sub)
+    # --- END bridge lab subparser -----------------------------------------
+
     return parser
 
 
@@ -161,6 +169,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         from .server import cli_serve
 
         return cli_serve(family=args.family)
+
+    # --- BEGIN bridge lab dispatch ----------------------------------------
+    if args.command == "lab":
+        from .lab.cli import dispatch_lab
+
+        return dispatch_lab(args)
+    # --- END bridge lab dispatch ------------------------------------------
 
     parser.error(f"unknown command {args.command!r}")
     return 2
