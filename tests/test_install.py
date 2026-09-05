@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import stat
 
+from bridge.claude_probe import ChannelMode, ChannelSupport
 from bridge.install import (
     claude_settings_path,
     codex_config_path,
@@ -16,7 +17,21 @@ from bridge.install import (
 )
 
 
+def _fake_probe(
+    support: ChannelSupport = ChannelSupport.UNSUPPORTED,
+    version: str = "",
+    args: list[str] | None = None,
+):
+    """A hermetic stand-in for claude_probe.detect_channel_mode. Tests that
+    don't care about channel detection get an UNSUPPORTED probe by default so
+    no real ``claude`` binary is ever invoked and no channel args file is
+    written, matching this suite's pre-detection behavior."""
+    mode = ChannelMode(support, version, list(args or []))
+    return lambda: mode
+
+
 def _install(paths, fake_user_home, **kw):
+    kw.setdefault("probe", _fake_probe())
     return install(
         paths=paths,
         claude_home=fake_user_home / ".claude",
@@ -61,6 +76,53 @@ def test_install_is_byte_identical_on_second_run(paths, fake_user_home):
     _install(paths, fake_user_home)
     for f in files:
         assert f.read_bytes() == first[f], f"{f} changed on second install"
+
+
+def test_install_writes_channel_args_for_development(paths, fake_user_home):
+    probe = _fake_probe(ChannelSupport.DEVELOPMENT, "2.0.0", ["--channels", "dev:bridge"])
+    report = _install(paths, fake_user_home, probe=probe)
+    args_file = paths.home / "claude_channel_args.json"
+    assert json.loads(args_file.read_text()) == ["--channels", "dev:bridge"]
+    assert report.channel_mode == "development"
+    assert any("research preview" in n.lower() for n in report.notes)
+
+
+def test_install_writes_channel_args_for_plugin(paths, fake_user_home):
+    probe = _fake_probe(
+        ChannelSupport.PLUGIN, "3.0.0", ["--channels", "plugin:bridge@bridge-marketplace"]
+    )
+    report = _install(paths, fake_user_home, probe=probe)
+    args_file = paths.home / "claude_channel_args.json"
+    assert json.loads(args_file.read_text()) == ["--channels", "plugin:bridge@bridge-marketplace"]
+    assert report.channel_mode == "plugin"
+    assert any("plugin" in n.lower() for n in report.notes)
+
+
+def test_install_writes_nothing_for_unsupported_channel(paths, fake_user_home):
+    probe = _fake_probe(ChannelSupport.UNSUPPORTED, "0.9.0")
+    report = _install(paths, fake_user_home, probe=probe)
+    args_file = paths.home / "claude_channel_args.json"
+    assert not args_file.exists()
+    assert report.channel_mode == "unsupported"
+    assert any("inbound-unreachable" in n for n in report.notes)
+
+
+def test_install_channel_args_byte_identical_on_second_run(paths, fake_user_home):
+    probe = _fake_probe(
+        ChannelSupport.PLUGIN, "3.0.0", ["--channels", "plugin:bridge@bridge-marketplace"]
+    )
+    _install(paths, fake_user_home, probe=probe)
+    args_file = paths.home / "claude_channel_args.json"
+    first = args_file.read_bytes()
+    _install(paths, fake_user_home, probe=probe)
+    assert args_file.read_bytes() == first
+
+
+def test_dry_run_does_not_write_channel_args(paths, fake_user_home):
+    probe = _fake_probe(ChannelSupport.DEVELOPMENT, "2.0.0", ["--channels", "dev:bridge"])
+    report = _install(paths, fake_user_home, probe=probe, dry_run=True)
+    assert not (paths.home / "claude_channel_args.json").exists()
+    assert report.channel_mode == "development"
 
 
 def test_install_preserves_unrelated_settings(paths, fake_user_home):
