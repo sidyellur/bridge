@@ -19,13 +19,14 @@ def render_roster(payload: dict[str, Any]) -> str:
         lines = ["(no sessions)"]
     else:
         lines = []
-        header = f"{'ID':<38} {'FAMILY':<7} {'STATE':<8} {'REACH':<5} CWD"
+        header = f"{'ID':<38} {'ALIAS':<12} {'FAMILY':<7} {'STATE':<8} {'REACH':<5} CWD"
         lines.append(header)
         for s in sessions:
             reach = "yes" if s.get("reachable") else "no"
             marker = "*" if s.get("is_self") else " "
+            alias = s.get("alias") or "-"
             lines.append(
-                f"{marker}{s['id']:<37} {s['family']:<7} {s['state']:<8} {reach:<5}"
+                f"{marker}{s['id']:<37} {alias:<12} {s['family']:<7} {s['state']:<8} {reach:<5}"
                 f" {s.get('cwd', '')}"
             )
             preview = (s.get("last_user_message") or "").strip()

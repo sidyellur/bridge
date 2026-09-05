@@ -61,6 +61,10 @@ class RouterConfig:
     queue_cap: int = 20
     timeout_cap_s: int = 60
     hop_budget: int = 1
+    # Transcript/rate retention. Rows older than this are dropped by the
+    # daemon's periodic prune (at most once per ``prune_interval_s``).
+    retention_s: float = 30 * 24 * 3600.0
+    prune_interval_s: float = 3600.0
 
 
 class Notifier(Protocol):
@@ -114,6 +118,8 @@ class Router:
         self.config = config or RouterConfig()
         # call_id -> (waiter, deadline) for synchronous calls awaiting a reply.
         self.pending_sync: dict[str, tuple[Any, float]] = {}
+        # Last retention sweep on the injected clock; None means "never".
+        self._last_prune: float | None = None
 
     @classmethod
     def create(
@@ -200,10 +206,35 @@ class Router:
         self.store.record_event("session", "offline", to_id=session_id)
         return {"ok": True}
 
+    # --- aliases (post-v1, optional) ---------------------------------------
+    def resolve_target(self, to: str) -> str:
+        """Map a ``to`` field through the user's contacts file.
+
+        A live session id always wins over an alias spelled the same way, and an
+        unknown name is returned unchanged so the ``unreachable`` guardrail --
+        not this helper -- produces the error. Contacts are re-read per call so
+        the daemon holds no alias state of its own.
+        """
+        from . import contacts
+
+        to = str(to)
+        if self.store.get_session(to) is not None:
+            return to
+        return contacts.resolve(self.paths, to)
+
+    def describe_target(self, to_id: str) -> str:
+        """``alias (id)`` when the user has an alias for ``to_id``, else the id."""
+        from . import contacts
+
+        return contacts.label(self.paths, to_id)
+
     def roster(self, args: dict[str, Any]) -> dict[str, Any]:
+        from . import contacts
+
         include_unmanaged = bool(args.get("include_unmanaged", False))
         caller = args.get("caller")
         sessions = self.store.list_sessions(include_unmanaged=include_unmanaged)
+        aliases = contacts.alias_index(self.paths)
         warnings: list[str] = []
         out = []
         for s in sessions:
@@ -213,6 +244,7 @@ class Router:
             out.append(
                 {
                     "id": s.id,
+                    "alias": aliases.get(s.id),
                     "family": s.family,
                     "state": s.state,
                     "reachable": reachable,
@@ -280,6 +312,25 @@ class Router:
         from .calls import expire_due
 
         expire_due(self)
+        self.maybe_prune()
+
+    def prune(self, older_than_s: float | None = None) -> dict[str, int]:
+        """Run a retention sweep now and restart the interval timer."""
+        if older_than_s is None:
+            older_than_s = self.config.retention_s
+        self._last_prune = self._now()
+        return self.store.prune(older_than_s)
+
+    def maybe_prune(self) -> dict[str, int] | None:
+        """Sweep at most once per ``prune_interval_s``; ``None`` when skipped.
+
+        The first tick always sweeps, so a router that was down for a month
+        catches up as soon as it comes back rather than waiting an hour.
+        """
+        last = self._last_prune
+        if last is not None and self._now() - last < self.config.prune_interval_s:
+            return None
+        return self.prune()
 
     def has_activity(self) -> bool:
         """True while any managed session is connected or any call is pending."""
@@ -705,3 +756,4 @@ _CALLER_OPS = {"roster", "call", "call_async", "text", "reply", "transcript", "a
 # the bottom so RouterError / register_op / Router are already defined.
 from . import calls as _calls  # noqa: E402,F401
 from . import delivery as _delivery  # noqa: E402,F401
+from . import retention as _retention  # noqa: E402,F401
