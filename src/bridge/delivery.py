@@ -84,7 +84,7 @@ def pump_target(router: Router, target_id: str) -> None:
 
 def do_text(router: Router, args: dict[str, Any]) -> dict[str, Any]:
     from_id = _require(args, "caller")
-    to_id = _require(args, "to")
+    to_id = router.resolve_target(_require(args, "to"))
     message = str(args.get("message", ""))[:_MAX_BODY]
 
     guardrails.outbound_precheck(router, from_id, to_id)

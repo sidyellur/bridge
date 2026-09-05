@@ -114,6 +114,39 @@ bridge roster
 bridge transcript
 ```
 
+### Aliases (optional)
+
+Session addresses are opaque UUIDs. If you would rather not type one, keep a
+private contacts file at `~/.bridge/contacts.json` (mode `0600`):
+
+```sh
+bridge alias web 3f9c1a52-...    # name a session
+bridge alias                     # list your aliases
+bridge alias --rm web            # forget one
+```
+
+Aliases are pure local convenience: the router reads the file on each `call`,
+`call_async`, or `text` and swaps the name for the real id before any guardrail
+runs, so nothing else changes. A real session id always wins over an alias
+spelled the same way, and an unknown name is still simply `unreachable`.
+`roster()` reports each session's `alias` (or `null`).
+
+### Retention
+
+The audit transcript and the rate counters are history, so the router trims
+them: once an hour it drops transcript rows, rate events, and *resolved* calls
+(with their message/queue rows) older than 30 days. Unresolved calls and events
+still owed to a target are live state and are never removed, however old.
+
+```sh
+bridge transcript --prune                  # apply the 30-day window now
+bridge transcript --prune --older-than 7d  # or 12h, 30m, or plain seconds
+```
+
+Pruning normally runs through the router so the daemon stays the single writer.
+If the router is not running there is no writer to contend with, so the command
+opens the database directly and says so.
+
 ## How it works
 
 Bridge uses the vendors' live integration surfaces:
