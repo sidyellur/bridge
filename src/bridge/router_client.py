@@ -22,7 +22,15 @@ from .protocol import (
     hello_args,
     request,
 )
-from .router import read_token
+from .router import RouterConfig, read_token
+
+# The router caps a synchronous call at ``RouterConfig.timeout_cap_s`` and then
+# answers it itself with a ``timeout`` result. A client that gave up at exactly
+# the cap would race that answer, so it waits a fixed slack longer and lets the
+# router's own verdict arrive. Derived from the cap rather than restated next to
+# it, so the two can never drift apart.
+CALL_TIMEOUT_SLACK_S = 5.0
+DEFAULT_CALL_TIMEOUT_S = RouterConfig().timeout_cap_s + CALL_TIMEOUT_SLACK_S
 
 
 class RouterClientError(Exception):
@@ -89,7 +97,13 @@ class RouterClient:
         self.call("hello", hello_args(token, session_id, role))
 
     # --- request/response ---------------------------------------------------
-    def call(self, op: str, args: dict[str, Any] | None = None, *, timeout: float = 65.0) -> Any:
+    def call(
+        self,
+        op: str,
+        args: dict[str, Any] | None = None,
+        *,
+        timeout: float = DEFAULT_CALL_TIMEOUT_S,
+    ) -> Any:
         with self._id_lock:
             req_id = self._next_id
             self._next_id += 1

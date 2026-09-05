@@ -2,7 +2,8 @@
 
 State is driven by wrapper launch, adapter connections, and vendor turn events
 — never by file mtime. A client-side :class:`Registry` reports transitions to
-the router; a store-side sweep offlines sessions whose process is gone.
+the router; the router enforces :func:`is_valid_transition` on every reported
+state; a store-side sweep offlines sessions whose process is gone.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ from .store import (
     STATE_IDLE,
     STATE_OFFLINE,
     STATE_STARTING,
+    STATE_WAITING,
     STATE_WORKING,
     Store,
 )
@@ -21,18 +23,27 @@ from .store import (
 if TYPE_CHECKING:
     from .router_client import RouterClient
 
-# Advisory transition graph (vendor events may move freely between active
-# states; this documents the expected flow and rejects nonsense).
+# Transition graph, enforced by ``Router.update_state``.
+#
+# Vendor events move freely between the live states: a session can go straight
+# from starting to waiting on input, and a reconnecting session comes back from
+# offline into whatever state its vendor reports. The graph is deliberately
+# permissive about *which* live state comes next -- inventing a stricter order
+# would strand real sessions whose adapter reports a legal state in an order we
+# did not predict. What it does reject is a state that is not a session state
+# at all (a typo or a vendor status leaking through unmapped), which used to
+# reach the store as a raw ValueError.
 _ALLOWED_NEXT: dict[str, set[str]] = {
-    STATE_STARTING: {STATE_IDLE, STATE_WORKING, STATE_OFFLINE},
-    STATE_IDLE: {"working", "waiting", STATE_OFFLINE, STATE_IDLE},
-    STATE_WORKING: {"idle", "waiting", STATE_OFFLINE, STATE_WORKING},
-    "waiting": {"idle", "working", STATE_OFFLINE, "waiting"},
-    STATE_OFFLINE: {STATE_STARTING, STATE_IDLE, STATE_WORKING, STATE_OFFLINE},
+    STATE_STARTING: {STATE_IDLE, STATE_WORKING, STATE_WAITING, STATE_OFFLINE},
+    STATE_IDLE: {STATE_WORKING, STATE_WAITING, STATE_OFFLINE, STATE_IDLE},
+    STATE_WORKING: {STATE_IDLE, STATE_WAITING, STATE_OFFLINE, STATE_WORKING},
+    STATE_WAITING: {STATE_IDLE, STATE_WORKING, STATE_OFFLINE, STATE_WAITING},
+    STATE_OFFLINE: {STATE_STARTING, STATE_IDLE, STATE_WORKING, STATE_WAITING, STATE_OFFLINE},
 }
 
 
 def is_valid_transition(current: str, nxt: str) -> bool:
+    """True when a session may move from ``current`` to ``nxt``."""
     if nxt not in SESSION_STATES:
         return False
     return nxt in _ALLOWED_NEXT.get(current, SESSION_STATES)
