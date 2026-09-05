@@ -12,7 +12,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from . import guardrails
-from .envelopes import preview, result_event
+from .envelopes import preview
 from .store import (
     CALL_ANSWERED,
     CALL_ANSWERING,
@@ -22,7 +22,6 @@ from .store import (
     CALL_TIMEOUT,
     CALL_UNREACHABLE,
     KIND_CALL,
-    KIND_CALL_RESULT,
 )
 
 if TYPE_CHECKING:
@@ -221,24 +220,9 @@ def _enqueue_call(
 
 def _push_result(router: Router, caller_id: str, call, status: str, *, via: str = "tool") -> None:
     """Wake the async caller's exact live session with a correlated result."""
-    event = result_event(call.call_id, call.question, call.answer, call.blocked)
-    event["status"] = status
-    event["via"] = via
-    message_id = router._idgen()
-    body = {
-        "event": event,
-        "from_id": call.to_id,
-        "gist": f"result:{status}",
-        "call_id": call.call_id,
-    }
-    router.store.create_message(
-        message_id, caller_id, KIND_CALL_RESULT, body, from_id=call.to_id, call_id=call.call_id
-    )
-    router.store.enqueue(caller_id, message_id)
-    router.store.record_event(
-        KIND_CALL_RESULT, "queued", from_id=call.to_id, to_id=caller_id, call_id=call.call_id
-    )
-    router.pump(caller_id)
+    from .async_results import push_call_result
+
+    push_call_result(router, caller_id, call, status, via=via)
 
 
 def _result(
