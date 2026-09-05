@@ -23,5 +23,6 @@
     "turn/completed": ["turn_id", "thread_id"]
   },
   "forbidden_in_v1": ["turn/steer"],
-  "runtime_status_values": ["idle", "working"]
+  "runtime_status_values": ["idle", "working"],
+  "launch_argv": ["{binary}", "app-server", "--listen", "unix://{socket_path}"]
 }

@@ -45,9 +45,16 @@ NotificationHandler = Callable[[dict[str, Any]], None]
 
 
 class RpcEndpoint:
-    def __init__(self, sock: socket.socket, *, name: str = "") -> None:
+    def __init__(
+        self,
+        sock: socket.socket,
+        *,
+        name: str = "",
+        on_close: Callable[[], None] | None = None,
+    ) -> None:
         self._sock = sock
         self._name = name
+        self._on_close = on_close
         self._buf = bytearray()
         self._methods: dict[str, MethodHandler] = {}
         self._notifications: dict[str, NotificationHandler] = {}
@@ -102,10 +109,12 @@ class RpcEndpoint:
                 pass
 
     def _read_loop(self) -> None:
+        unexpected = False
         try:
             while not self._closed:
                 chunk = self._sock.recv(65536)
                 if not chunk:
+                    unexpected = not self._closed
                     break
                 self._buf.extend(chunk)
                 while b"\n" in self._buf:
@@ -115,9 +124,14 @@ class RpcEndpoint:
                     if line:
                         self._handle_line(bytes(line))
         except OSError:
-            pass
+            unexpected = not self._closed
         finally:
             self._fail_pending()
+            # Only signal callers when the peer went away unexpectedly (e.g. the
+            # App Server crashed) — not when we tore the connection down
+            # ourselves via close().
+            if unexpected and self._on_close is not None:
+                self._on_close()
 
     def _handle_line(self, line: bytes) -> None:
         try:
