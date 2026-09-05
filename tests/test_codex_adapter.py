@@ -19,6 +19,7 @@ import pytest
 from bridge.adapters.codex import CodexAdapter
 from bridge.codex_app_server import (
     FORBIDDEN_METHODS,
+    LAUNCH_ARGV,
     SUPPORTED_VERSIONS,
     CodexAppServerClient,
     UnsupportedCodexVersion,
@@ -86,6 +87,7 @@ def test_pinned_contract_matches_fixture():
     assert data["protocol_version"] in SUPPORTED_VERSIONS
     assert tuple(data["supported_versions"]) == SUPPORTED_VERSIONS
     assert tuple(data["forbidden_in_v1"]) == FORBIDDEN_METHODS
+    assert tuple(data["launch_argv"]) == LAUNCH_ARGV
 
 
 def test_unsupported_version_raises():
@@ -176,6 +178,92 @@ def test_mcp_reply_path_wins_over_fallback(codex_factory):
 
     assert result_box["result"]["answer"] == "fresh MCP answer"
     assert result_box["result"]["meta"]["via"] == "tool"
+
+
+def test_app_server_crash_marks_unreachable_and_records_disconnected(codex_factory):
+    rr, make = codex_factory
+    adapter, server = make("codex-1")
+    adapter.start()
+    ctrl = rr.client(session_id="ctrl")
+    assert _wait_reachable(ctrl, "codex-1")
+
+    # Simulate a crash: the RPC connection drops out from under the adapter,
+    # not a deliberate adapter.close() — never a headless answer.
+    server.close()
+
+    deadline = time.time() + 3
+    entry = None
+    while time.time() < deadline:
+        roster = ctrl.call("roster", {})
+        entry = next(s for s in roster["sessions"] if s["id"] == "codex-1")
+        if entry["reachable"] is False:
+            break
+        time.sleep(0.02)
+    assert entry is not None and entry["reachable"] is False
+
+    tx = ctrl.call("transcript", {"limit": 20})
+    assert any(
+        e["kind"] == "session" and e["status"] == "disconnected" and e["to"] == "codex-1"
+        for e in tx["entries"]
+    )
+
+
+def test_reconnect_recovers_after_transient_disconnect(codex_factory):
+    rr, make = codex_factory
+    adapter, server = make("codex-1")
+
+    spawned: list[FakeCodexAppServer] = []
+
+    def reconnect():
+        client_sock, server_sock = socket.socketpair()
+        fresh = FakeCodexAppServer(server_sock)
+        spawned.append(fresh)
+        return CodexAppServerClient(client_sock).start()
+
+    adapter._reconnect = reconnect
+    adapter._reconnect_sleep = lambda _s: None  # no real waiting in tests
+    adapter.start()
+    ctrl = rr.client(session_id="ctrl")
+    assert _wait_reachable(ctrl, "codex-1")
+
+    server.close()  # transient crash
+
+    deadline = time.time() + 3
+    while time.time() < deadline and not spawned:
+        time.sleep(0.02)
+    assert spawned, "adapter never attempted to reconnect"
+
+    assert _wait_reachable(ctrl, "codex-1", timeout=3.0)
+    for s in spawned:
+        s.close()
+
+
+def test_reconnect_gives_up_after_exhausting_attempts(codex_factory):
+    rr, make = codex_factory
+    adapter, server = make("codex-1")
+
+    attempts = {"n": 0}
+
+    def reconnect():
+        attempts["n"] += 1
+        raise OSError("still dead")
+
+    adapter._reconnect = reconnect
+    adapter._reconnect_sleep = lambda _s: None
+    adapter._reconnect_attempts = 3
+    adapter.start()
+    ctrl = rr.client(session_id="ctrl")
+    assert _wait_reachable(ctrl, "codex-1")
+
+    server.close()
+
+    deadline = time.time() + 3
+    while time.time() < deadline and attempts["n"] < 3:
+        time.sleep(0.02)
+    assert attempts["n"] == 3
+    roster = ctrl.call("roster", {})
+    entry = next(s for s in roster["sessions"] if s["id"] == "codex-1")
+    assert entry["reachable"] is False
 
 
 def test_working_status_holds_delivery(codex_factory):

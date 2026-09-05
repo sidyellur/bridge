@@ -60,13 +60,35 @@ the channel capability, under **Claude channel policy**.
 ## Launch flow
 
 Sessions are launched through thin wrappers so Bridge can guarantee identity and
-reachability. The wrappers pass your arguments, signals, and exit code straight
+reachability. Both wrappers pass your arguments, signals, and exit code straight
 through to the vendor CLI and print the Bridge address once:
 
 ```sh
 bridge claude [claude args...]
 bridge codex  [codex args...]
 ```
+
+`bridge claude` attaches the Claude Channel to an ordinary Claude Code process.
+`bridge codex` does more, because Codex's live-call surface is a server, not a
+channel: for every `bridge codex` invocation, the wrapper itself owns one
+Codex App Server for the lifetime of that session, in this order:
+
+1. Spawn `codex app-server --listen unix://~/.bridge/sessions/<id>/codex.sock`
+   and wait (bounded, with a clear error otherwise) for that socket to appear.
+2. Connect Bridge's own adapter to it — handshake, register with the router,
+   and subscribe to inbound events — so the session is **reachable before the
+   TUI ever attaches**.
+3. Launch the normal Codex TUI attached remotely: `codex --remote
+   unix://…<same socket>`, forwarding your other arguments untouched.
+4. On exit, tear down in reverse: close the adapter, terminate the App Server
+   (`SIGTERM`, then `SIGKILL` if it doesn't stop), and reap both children —
+   never leaving a zombie process or a stale socket behind.
+
+If the App Server dies mid-session, the adapter notices the connection drop,
+marks the session `reachable=false`, records a `disconnected` transcript entry,
+and tries a short bounded-backoff reconnect to the same socket — it never
+answers a call from a stale final message instead. `bridge doctor` checks that
+every session it still considers live has a listening App Server socket.
 
 An agent session opened *outside* these wrappers is not silently treated as
 callable — `roster` shows it as unmanaged with `reachable=false`, and `call`/

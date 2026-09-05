@@ -13,7 +13,10 @@ constants here must match it (a test asserts they do).
 from __future__ import annotations
 
 import socket
+import subprocess
+import time
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from .mcp import RpcEndpoint
@@ -25,9 +28,24 @@ FORBIDDEN_METHODS = ("turn/steer",)
 STATUS_IDLE = "idle"
 STATUS_WORKING = "working"
 
+# Pinned launch command for the App Server Bridge spawns per wrapped Codex
+# session. Mirrored verbatim as "launch_argv" in
+# tests/fixtures/codex_protocol/v1.json so the two cannot drift; a test
+# asserts they match.
+LAUNCH_ARGV: tuple[str, ...] = ("{binary}", "app-server", "--listen", "unix://{socket_path}")
+
+
+def build_launch_argv(binary: str, socket_path: object) -> list[str]:
+    """Fill :data:`LAUNCH_ARGV` for a concrete binary and socket path."""
+    return [tok.format(binary=binary, socket_path=socket_path) for tok in LAUNCH_ARGV]
+
 
 class UnsupportedCodexVersion(Exception):
     pass
+
+
+class CodexAppServerStartError(Exception):
+    """The App Server process could not be started or never bound its socket."""
 
 
 class CodexAppServerClient:
@@ -38,8 +56,10 @@ class CodexAppServerClient:
         on_thread_bound: Callable[[str], None] | None = None,
         on_status: Callable[[str], None] | None = None,
         on_turn_completed: Callable[[str, str], None] | None = None,
+        on_disconnect: Callable[[], None] | None = None,
     ) -> None:
-        self.rpc = RpcEndpoint(sock, name="codex-app-server")
+        self._on_disconnect = on_disconnect
+        self.rpc = RpcEndpoint(sock, name="codex-app-server", on_close=self._on_rpc_closed)
         self.thread_id: str | None = None
         self.status: str = STATUS_IDLE
         self.server_info: dict[str, Any] = {}
@@ -49,6 +69,10 @@ class CodexAppServerClient:
         self._delta: dict[str, str] = {}
         self._final: dict[str, str] = {}
         self._register()
+
+    def _on_rpc_closed(self) -> None:
+        if self._on_disconnect is not None:
+            self._on_disconnect()
 
     def _register(self) -> None:
         self.rpc.notification("thread/started", self._on_thread)
@@ -130,27 +154,88 @@ class CodexAppServerClient:
         self.rpc.close()
 
 
-class CodexAppServerProcess:  # pragma: no cover - real subprocess wiring
-    """Spawns and reaps a real ``codex app-server`` bound to a Unix socket."""
+class CodexAppServerProcess:
+    """Spawns, waits on, and reaps a ``codex app-server`` bound to a Unix socket.
+
+    Command construction is pinned by :data:`LAUNCH_ARGV`; ``start``/
+    ``wait_for_socket``/``stop`` take injectable ``spawn``/``sleep``/``now`` so
+    they are unit-testable against a fake ``Popen``-like object and never touch
+    a real ``codex`` binary in tests.
+    """
 
     def __init__(self, socket_path, *, binary: str = "codex") -> None:
         self.socket_path = socket_path
         self.binary = binary
-        self.proc = None
+        self.proc: subprocess.Popen | None = None
 
-    def start(self, env: dict[str, str] | None = None):
-        import subprocess
-
-        self.proc = subprocess.Popen(
-            [self.binary, "app-server", "--listen", f"unix://{self.socket_path}"], env=env
-        )
+    def start(
+        self,
+        env: dict[str, str] | None = None,
+        *,
+        spawn: Callable[..., subprocess.Popen] = subprocess.Popen,
+    ) -> subprocess.Popen:
+        argv = build_launch_argv(self.binary, self.socket_path)
+        self.proc = spawn(argv, env=env)
         return self.proc
 
-    def stop(self) -> None:
+    def wait_for_socket(
+        self,
+        timeout: float = 10.0,
+        *,
+        sleep: Callable[[float], None] = time.sleep,
+        now: Callable[[], float] = time.time,
+    ) -> None:
+        """Block until ``socket_path`` exists, bounded by ``timeout``.
+
+        Raises :class:`CodexAppServerStartError` immediately if the process
+        already exited (never waiting out the full timeout for a dead child),
+        and after ``timeout`` seconds if the socket never appears.
+        """
+        path = Path(self.socket_path)
+        deadline = now() + timeout
+        while True:
+            if path.exists():
+                return
+            if self.proc is not None and self.proc.poll() is not None:
+                raise CodexAppServerStartError(
+                    f"codex app-server exited with code {self.proc.returncode} "
+                    f"before binding {path}"
+                )
+            if now() >= deadline:
+                raise CodexAppServerStartError(
+                    f"codex app-server did not bind {path} within {timeout}s"
+                )
+            sleep(0.02)
+
+    def stop(self, *, timeout: float = 5.0) -> int | None:
+        """Terminate, escalate to kill on timeout, and reap. Idempotent."""
         if self.proc is None:
-            return
-        self.proc.terminate()
+            return None
+        if self.proc.poll() is None:
+            self.proc.terminate()
+            try:
+                self.proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+                self.proc.wait(timeout=timeout)
+        else:
+            self.proc.wait()
+        return self.proc.returncode
+
+
+def connect_app_server_socket(socket_path, *, timeout: float = 5.0) -> socket.socket:
+    """Connect a client socket to a just-started App Server, with a short
+    bounded retry for the narrow race between the socket file appearing and
+    the server being ready to ``accept``."""
+    deadline = time.time() + timeout
+    last_err: OSError | None = None
+    while time.time() < deadline:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
-            self.proc.wait(timeout=5)
-        except Exception:
-            self.proc.kill()
+            sock.connect(str(socket_path))
+            return sock
+        except OSError as exc:
+            last_err = exc
+            sock.close()
+            time.sleep(0.02)
+    raise CodexAppServerStartError(f"could not connect to codex app-server socket: {last_err}")
