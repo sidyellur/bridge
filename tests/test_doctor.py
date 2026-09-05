@@ -82,3 +82,62 @@ def test_loopback_probe_ok_when_idle(paths, fake_user_home):
     _install(paths, fake_user_home)
     report = _doctor(paths, fake_user_home)
     assert _status(report, "loopback protocol probe") == OK  # idle: nothing to probe
+
+
+def test_codex_liveness_ok_with_no_sessions(paths, fake_user_home):
+    _install(paths, fake_user_home)
+    report = _doctor(paths, fake_user_home)
+    assert _status(report, "codex app-server liveness") == OK
+
+
+def test_codex_liveness_ok_when_socket_is_listening(paths, fake_user_home):
+    import socket
+
+    from bridge.store import Store
+
+    _install(paths, fake_user_home)
+    session_id = "codex-live-1"
+    store = Store.open(paths)
+    store.upsert_session(session_id, "codex", state="idle", is_managed=True, reachable=True)
+    store.close()
+
+    sock_path = paths.ensure_session_dir(session_id) / "codex.sock"
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        srv.bind(str(sock_path))
+        srv.listen(1)
+        report = _doctor(paths, fake_user_home)
+        assert _status(report, "codex app-server liveness") == OK
+        assert report.ok
+    finally:
+        srv.close()
+
+
+def test_codex_liveness_fails_for_dead_socket_on_live_session(paths, fake_user_home):
+    from bridge.store import Store
+
+    _install(paths, fake_user_home)
+    session_id = "codex-dead-1"
+    store = Store.open(paths)
+    store.upsert_session(session_id, "codex", state="working", is_managed=True, reachable=True)
+    store.close()
+    paths.ensure_session_dir(session_id)  # socket file never created: a crash
+
+    report = _doctor(paths, fake_user_home)
+    assert _status(report, "codex app-server liveness") == FAIL
+    assert not report.ok
+
+
+def test_codex_liveness_ignores_offline_sessions(paths, fake_user_home):
+    from bridge.store import Store
+
+    _install(paths, fake_user_home)
+    session_id = "codex-offline-1"
+    store = Store.open(paths)
+    store.upsert_session(session_id, "codex", state="offline", is_managed=True, reachable=False)
+    store.close()
+    # No socket exists at all for this session; it must not be checked.
+
+    report = _doctor(paths, fake_user_home)
+    assert _status(report, "codex app-server liveness") == OK
+    assert report.ok

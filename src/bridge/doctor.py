@@ -119,6 +119,12 @@ def doctor(
     # Loopback protocol probe (uses the local token; no model tokens).
     report.add(*_loopback_probe(paths))
 
+    # Per-session Codex App Server liveness (token-free): any managed session
+    # the registry still considers live should have a listening App Server
+    # socket. A dead socket behind a "live" session means bridge codex was
+    # killed uncleanly and the state is stale.
+    report.add(*_codex_app_server_liveness(paths))
+
     return report
 
 
@@ -169,6 +175,55 @@ def _loopback_probe(paths: Paths) -> tuple[str, str, str]:
         return ("loopback protocol probe", FAIL, exc.message)
     finally:
         client.close()
+
+
+def _codex_app_server_liveness(paths: Paths) -> tuple[str, str, str]:
+    if not paths.db.exists():
+        return ("codex app-server liveness", OK, "no sessions recorded yet")
+
+    from .store import STATE_OFFLINE, Store
+
+    try:
+        store = Store.open(paths, read_only=True)
+    except Exception as exc:  # noqa: BLE001 - a corrupt/locked db is a warning, not a crash
+        return ("codex app-server liveness", WARN, f"could not read session store: {exc}")
+    try:
+        sessions = [
+            s
+            for s in store.list_sessions(include_unmanaged=False)
+            if s.family == "codex" and s.state != STATE_OFFLINE
+        ]
+    finally:
+        store.close()
+
+    if not sessions:
+        return ("codex app-server liveness", OK, "no live-managed Codex sessions")
+
+    dead = [s.id for s in sessions if not _codex_socket_is_live(paths.codex_socket(s.id))]
+    if dead:
+        return (
+            "codex app-server liveness",
+            FAIL,
+            f"dead App Server socket for session(s): {', '.join(dead)}",
+        )
+    return ("codex app-server liveness", OK, f"{len(sessions)} live session(s) checked")
+
+
+def _codex_socket_is_live(socket_path: Path, *, timeout: float = 1.0) -> bool:
+    """Connect-and-close probe: no data is sent, no token is needed."""
+    import socket
+
+    if not socket_path.exists():
+        return False
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        sock.settimeout(timeout)
+        sock.connect(str(socket_path))
+        return True
+    except OSError:
+        return False
+    finally:
+        sock.close()
 
 
 def cli_doctor() -> int:  # pragma: no cover - thin shim
