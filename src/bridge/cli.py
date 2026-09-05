@@ -2,8 +2,8 @@
 
 Subcommands are wired up incrementally by later modules; this module owns
 argument parsing, ``--version``, and dispatch. Wrappers (``bridge claude`` /
-``bridge codex``), diagnostics (``roster`` / ``call`` / ``text`` /
-``transcript``), and lifecycle (``install`` / ``uninstall`` / ``doctor`` /
+``bridge codex``), diagnostics (``roster`` / ``watch`` / ``call`` /
+``text`` / ``transcript``), and lifecycle (``install`` / ``uninstall`` / ``doctor`` /
 ``router``) all resolve here.
 """
 
@@ -34,6 +34,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_roster = sub.add_parser("roster", help="list managed sessions")
     p_roster.add_argument("--include-unmanaged", action="store_true")
     p_roster.add_argument("--json", action="store_true", help="emit raw JSON")
+
+    # --- bridge watch (issue #5 part B) ----------------------------------
+    p_watch = sub.add_parser("watch", help="live read-only view of the router")
+    p_watch.add_argument(
+        "--interval", type=float, default=0.5, help="redraw interval in seconds (default 0.5)"
+    )
+    p_watch.add_argument("--once", action="store_true", help="render a single frame and exit")
+    # --- end bridge watch -------------------------------------------------
 
     p_text = sub.add_parser("text", help="send an informational text to a session")
     p_text.add_argument("to")
@@ -80,6 +88,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         from .roster import cli_roster
 
         return cli_roster(include_unmanaged=args.include_unmanaged, as_json=args.json)
+    # --- bridge watch (issue #5 part B) ----------------------------------
+    if args.command == "watch":
+        from .cli_commands import cli_watch
+
+        return cli_watch(interval_s=args.interval, once=args.once)
+    # --- end bridge watch -------------------------------------------------
     if args.command == "text":
         from .cli_commands import cli_text
 

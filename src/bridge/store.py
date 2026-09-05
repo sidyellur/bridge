@@ -13,7 +13,7 @@ import json
 import sqlite3
 import threading
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -598,6 +598,29 @@ class Store:
             ).fetchone()
         return int(row["n"])
 
+    # --- read-only inspection helpers ---------------------------------------
+    # Used by `bridge watch`, which opens this database read-only alongside the
+    # daemon. They are plain aggregate reads: no writes, no clock, no I/O
+    # beyond the connection.
+    def queue_depths(self) -> dict[str, int]:
+        """Pending item count per target (queued plus delivered-but-unacked)."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT target_id, COUNT(*) AS n FROM queue WHERE status IN (?, ?)"
+                " GROUP BY target_id ORDER BY target_id",
+                (MSG_QUEUED, MSG_DELIVERED),
+            ).fetchall()
+        return {row["target_id"]: int(row["n"]) for row in rows}
+
+    def active_calls(self) -> list[Call]:
+        """Calls still in flight: queued for delivery, delivered, or answering."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM calls WHERE status IN (?, ?, ?) ORDER BY created_at",
+                (CALL_QUEUED, CALL_DELIVERED, CALL_ANSWERING),
+            ).fetchall()
+        return [_row_to_call(r) for r in rows]
+
 
 # --- row helpers -----------------------------------------------------------
 
@@ -668,7 +691,3 @@ def _row_to_transcript(row: sqlite3.Row) -> TranscriptEntry:
         gist=row["gist"],
         call_id=row["call_id"],
     )
-
-
-def iter_json_list(value: Iterable[Any]) -> list[Any]:  # small convenience for callers
-    return list(value)

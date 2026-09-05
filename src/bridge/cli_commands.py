@@ -1,5 +1,5 @@
 """Human-facing CLI diagnostics: ``bridge text``, ``bridge call``,
-``bridge transcript``.
+``bridge transcript``, ``bridge watch``.
 
 These connect to the router for inspection and one-off messages. Outbound
 ``call``/``text`` require a managed source session (``BRIDGE_SESSION_ID`` from a
@@ -65,6 +65,13 @@ def cli_call(to: str, question: str, *, timeout_s: int = 60) -> int:
         return 0 if result.get("status") == "answered" else 1
     finally:
         client.close()
+
+
+def cli_watch(*, interval_s: float = 0.5, once: bool = False) -> int:
+    """``bridge watch`` - a read-only live view; no router connection needed."""
+    from .watch import run_watch
+
+    return run_watch(Paths.resolve(), interval_s=interval_s, once=once)
 
 
 def cli_transcript(*, peer: str | None = None, limit: int = 20) -> int:
