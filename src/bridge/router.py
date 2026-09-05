@@ -176,6 +176,8 @@ class Router:
             self.store.set_vendor_session(session_id, args["vendor_session_id"])
         if "last_user_message" in args:
             self.store.set_last_user_message(session_id, args["last_user_message"])
+        if args.get("pid") is not None:
+            self.store.set_pid(session_id, int(args["pid"]))
         # Becoming idle may release a queued delivery.
         self.pump(session_id)
         return {"ok": True}

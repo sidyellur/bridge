@@ -330,6 +330,13 @@ class Store:
                 (message[:120], self._now(), session_id),
             )
 
+    def set_pid(self, session_id: str, pid: int) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE sessions SET pid=?, last_active=? WHERE id=?",
+                (pid, self._now(), session_id),
+            )
+
     def touch(self, session_id: str) -> None:
         with self._lock:
             self._conn.execute(
