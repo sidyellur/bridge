@@ -15,6 +15,7 @@ from bridge.launch import (
     build_claude_argv,
     build_codex_argv,
     build_identity_env,
+    codex_final_message_fallback_enabled,
     load_claude_channel_args,
     resolve_binary,
     resolve_claude_session_id,
@@ -80,6 +81,17 @@ def test_load_claude_channel_args(paths):
     assert load_claude_channel_args(paths) == ["--channels", "bridge@dev"]
 
 
+def test_codex_final_message_fallback_enabled_defaults_off():
+    assert codex_final_message_fallback_enabled({}) is False
+    assert codex_final_message_fallback_enabled({"BRIDGE_CODEX_FINAL_FALLBACK": "0"}) is False
+    assert codex_final_message_fallback_enabled({"BRIDGE_CODEX_FINAL_FALLBACK": "no"}) is False
+
+
+def test_codex_final_message_fallback_enabled_via_env():
+    for value in ("1", "true", "True", "yes", "YES"):
+        assert codex_final_message_fallback_enabled({"BRIDGE_CODEX_FINAL_FALLBACK": value}) is True
+
+
 def test_resolve_binary_env_override():
     env = {"BRIDGE_CLAUDE_BIN": "/opt/fake/claude", "PATH": "/nowhere"}
     assert resolve_binary("claude", env) == "/opt/fake/claude"
@@ -140,28 +152,10 @@ def test_run_wrapper_passes_identity_and_exit_code(paths, tmp_path, ids):
         assert entry["state"] == "offline"
 
 
-def test_run_wrapper_codex_builds_remote_socket(paths, tmp_path, ids):
-    capture = tmp_path / "cap.jsonl"
-    bindir = tmp_path / "bin"
-    make_capture_exe(bindir, "codex", capture)
-
-    with RunningRouter(paths) as rr:
-        env = {"PATH": f"{bindir}", "BRIDGE_CODEX_BIN": str(bindir / "codex")}
-        result = run_wrapper(
-            "codex",
-            ["--model", "o3"],
-            paths=paths,
-            env=env,
-            new_id=ids.new,
-            ensure_running=lambda p: None,
-            connect=lambda paths, session_id, role: rr.client(session_id=session_id, role=role),
-            forward_signals=False,
-            print_address=False,
-        )
-        records = read_captures(capture)
-        assert records[0]["argv"][0] == "--remote"
-        assert records[0]["argv"][1].startswith("unix://")
-        assert result.session_id in records[0]["argv"][1]
+# Codex wrapper tests exercising the App-Server-owning flow live in
+# tests/test_codex_launch.py, which uses tests/fakes/codex_exe.py (a fake
+# `codex` binary that really binds the App Server socket) instead of the
+# plain single-mode capture exe used above.
 
 
 def test_run_wrapper_uses_spawn_injection(paths, ids):

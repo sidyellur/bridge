@@ -15,6 +15,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import time
 import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -30,6 +31,8 @@ from .paths import (
 CLAUDE_BIN_ENV = "BRIDGE_CLAUDE_BIN"
 CODEX_BIN_ENV = "BRIDGE_CODEX_BIN"
 CLAUDE_CHANNEL_ARGS_FILE = "claude_channel_args.json"
+CODEX_FINAL_FALLBACK_ENV = "BRIDGE_CODEX_FINAL_FALLBACK"
+CODEX_APP_SERVER_TIMEOUT_S = 10.0
 
 FORWARDED_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGWINCH, signal.SIGHUP)
 
@@ -92,6 +95,14 @@ def load_claude_channel_args(paths: Paths) -> list[str]:
     except (json.JSONDecodeError, OSError):
         return []
     return [str(x) for x in data] if isinstance(data, list) else []
+
+
+def codex_final_message_fallback_enabled(env: dict[str, str] | None = None) -> bool:
+    """Experiment F gate for the Codex final-agent-message reply fallback.
+    Off by default; a deployment enables it only once the experiment verdict
+    validates the correlation (see design spec §7, §12)."""
+    env = os.environ if env is None else env
+    return env.get(CODEX_FINAL_FALLBACK_ENV, "").strip().lower() in ("1", "true", "yes")
 
 
 def resolve_binary(family: str, env: dict[str, str] | None = None) -> str:
@@ -160,6 +171,10 @@ def run_wrapper(
     connect: Callable[..., object] | None = None,
     forward_signals: bool = True,
     print_address: bool = True,
+    codex_app_server_timeout: float = CODEX_APP_SERVER_TIMEOUT_S,
+    sleep: Callable[[float], None] = time.sleep,
+    now: Callable[[], float] = time.time,
+    codex_final_message_fallback: bool | None = None,
 ) -> LaunchResult:
     from .registry import Registry
 
@@ -184,10 +199,24 @@ def run_wrapper(
         channel_args = load_claude_channel_args(paths)
         argv = build_claude_argv(binary, session_id, user_args, channel_args, is_resume=is_resume)
     elif family == "codex":
-        session_id = new_id()
-        paths.ensure_session_dir(session_id)
-        binary = resolve_binary("codex", base_env)
-        argv = build_codex_argv(binary, paths.codex_socket(session_id), user_args)
+        return _run_codex_wrapper(
+            user_args,
+            paths=paths,
+            base_env=base_env,
+            new_id=new_id,
+            spawn=spawn,
+            connect=connect,
+            forward_signals=forward_signals,
+            print_address=print_address,
+            app_server_timeout=codex_app_server_timeout,
+            sleep=sleep,
+            now=now,
+            final_message_fallback=(
+                codex_final_message_fallback
+                if codex_final_message_fallback is not None
+                else codex_final_message_fallback_enabled(base_env)
+            ),
+        )
     else:
         raise ValueError(f"unknown family {family!r}")
 
@@ -214,6 +243,118 @@ def run_wrapper(
     finally:
         registry.mark_offline(session_id)
         _safe_close(client)
+
+    return LaunchResult(session_id=session_id, argv=argv, returncode=returncode or 0)
+
+
+# --- codex: App Server owner + adapter + remote TUI -------------------------
+
+
+def _run_codex_wrapper(
+    user_args: Sequence[str],
+    *,
+    paths: Paths,
+    base_env: dict[str, str],
+    new_id: Callable[[], str],
+    spawn: Callable[..., subprocess.Popen],
+    connect: Callable[..., object],
+    forward_signals: bool,
+    print_address: bool,
+    app_server_timeout: float,
+    sleep: Callable[[float], None],
+    now: Callable[[], float],
+    final_message_fallback: bool,
+) -> LaunchResult:
+    """One Bridge-managed App Server per wrapped Codex session (spec §4, §5):
+    spawn the App Server, wait for its socket, connect the adapter so the
+    session is registered/reachable, *then* attach the remote TUI. Tears down
+    in reverse order on exit, reaping both children."""
+    from .adapters.codex import CodexAdapter
+    from .codex_app_server import (
+        CodexAppServerClient,
+        CodexAppServerProcess,
+        connect_app_server_socket,
+    )
+
+    session_id = new_id()
+    paths.ensure_session_dir(session_id)
+    binary = resolve_binary("codex", base_env)
+    socket_path = paths.codex_socket(session_id)
+    argv = build_codex_argv(binary, socket_path, user_args)
+    child_env = build_identity_env(paths, session_id, base_env)
+
+    app_server = CodexAppServerProcess(socket_path, binary=binary)
+    app_server.start(env=child_env, spawn=spawn)
+    try:
+        app_server.wait_for_socket(app_server_timeout, sleep=sleep, now=now)
+    except Exception:
+        app_server.stop()
+        raise
+
+    def _reconnect() -> CodexAppServerClient:
+        # A short per-attempt timeout: a dead App Server refuses the
+        # connection immediately (ECONNREFUSED), so this bounds how long one
+        # of CodexAdapter's own backed-off attempts can take, not whether a
+        # live server gets time to answer.
+        sock = connect_app_server_socket(socket_path, timeout=0.5)
+        return CodexAppServerClient(sock).start()
+
+    def _print_disconnect_diagnostic() -> None:
+        print(
+            f"[bridge] codex app-server for session {session_id} disconnected; "
+            "session marked unreachable",
+            file=sys.stderr,
+        )
+
+    adapter = None
+    try:
+        app_client = _reconnect()
+        adapter = CodexAdapter(
+            session_id,
+            app_client,
+            final_message_fallback=final_message_fallback,
+            cwd=os.getcwd(),
+            reconnect=_reconnect,
+            on_app_server_disconnect=_print_disconnect_diagnostic,
+            reconnect_sleep=sleep,
+        )
+        adapter.connect_router(
+            lambda on_event: connect(
+                paths, session_id=session_id, role="adapter", on_event=on_event
+            )
+        )
+        adapter.start()
+    except Exception:
+        try:
+            (adapter or app_client).close()
+        except Exception:  # noqa: BLE001
+            pass
+        app_server.stop()
+        raise
+
+    if print_address:
+        print(f"[bridge] session address: {session_id}", file=sys.stderr)
+
+    proc = spawn(argv, env=child_env)
+    if getattr(proc, "pid", None) is not None:
+        try:
+            adapter.router.call("update_state", {"session_id": session_id, "pid": proc.pid})
+        except Exception:  # noqa: BLE001
+            pass
+
+    try:
+        if forward_signals:
+            with SignalForwarder(proc):
+                returncode = proc.wait()
+        else:
+            returncode = proc.wait()
+    finally:
+        try:
+            adapter.router.call("deregister", {"session_id": session_id})
+        except Exception:  # noqa: BLE001
+            pass
+        adapter.close()
+        app_server.stop()
 
     return LaunchResult(session_id=session_id, argv=argv, returncode=returncode or 0)
 
