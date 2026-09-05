@@ -4,13 +4,29 @@ no-impersonation rule for outbound messages.
 
 from __future__ import annotations
 
+import inspect
+
 import pytest
 
 from bridge.cli import main
 from bridge.cli_commands import cli_call, cli_text, cli_transcript
 from bridge.roster import cli_roster
+from bridge.router import RouterConfig
+from bridge.router_client import (
+    CALL_TIMEOUT_SLACK_S,
+    DEFAULT_CALL_TIMEOUT_S,
+    RouterClient,
+)
 
 from .fakes.router_peer import RunningRouter
+
+
+def test_client_call_timeout_is_derived_from_the_router_cap():
+    """The client must outlive the router's own timeout verdict, by derivation
+    rather than by a hard-coded 65.0 that can drift from the cap."""
+    assert DEFAULT_CALL_TIMEOUT_S == RouterConfig().timeout_cap_s + CALL_TIMEOUT_SLACK_S
+    default = inspect.signature(RouterClient.call).parameters["timeout"].default
+    assert default == DEFAULT_CALL_TIMEOUT_S
 
 
 @pytest.fixture

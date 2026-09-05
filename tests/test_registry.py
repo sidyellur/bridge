@@ -1,6 +1,11 @@
-"""Task 4 verify (registry): state transitions, stale sweep, unmanaged records."""
+"""Task 4 verify (registry): state transitions, stale sweep, unmanaged records.
+
+Issue #5 part D adds the router-side enforcement of ``is_valid_transition``.
+"""
 
 from __future__ import annotations
+
+import pytest
 
 from bridge.registry import (
     Registry,
@@ -8,6 +13,7 @@ from bridge.registry import (
     register_unmanaged,
     sweep_stale,
 )
+from bridge.router import RouterError
 from bridge.store import (
     STATE_IDLE,
     STATE_OFFLINE,
@@ -27,6 +33,27 @@ def test_valid_transitions():
     assert is_valid_transition("waiting", STATE_IDLE)
     assert is_valid_transition(STATE_IDLE, STATE_OFFLINE)
     assert not is_valid_transition(STATE_IDLE, "bogus")
+
+
+def test_router_enforces_a_valid_transition(router_core):
+    """A legal move is applied and answered normally."""
+    r = router_core
+    r.store.upsert_session("s1", "claude", state=STATE_STARTING)
+    outcome, _ = r.dispatch("update_state", {"session_id": "s1", "state": STATE_WORKING})
+    assert outcome == "respond"
+    assert r.store.get_session("s1").state == STATE_WORKING
+
+
+def test_router_rejects_an_invalid_transition(router_core):
+    """A state that is not a session state is refused, not written."""
+    r = router_core
+    r.store.upsert_session("s1", "claude", state=STATE_IDLE)
+    with pytest.raises(RouterError) as exc:
+        r.dispatch("update_state", {"session_id": "s1", "state": "compacting"})
+    assert exc.value.code == "bad_transition"
+    assert r.store.get_session("s1").state == STATE_IDLE  # untouched
+    rejected = [e for e in r.store.recent(limit=10) if e.status == "rejected"]
+    assert rejected and "compacting" in rejected[0].gist
 
 
 def test_registry_reports_transitions(paths):
