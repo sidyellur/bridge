@@ -114,6 +114,23 @@ bridge roster
 bridge transcript
 ```
 
+### Aliases (optional)
+
+Session addresses are opaque UUIDs. If you would rather not type one, keep a
+private contacts file at `~/.bridge/contacts.json` (mode `0600`):
+
+```sh
+bridge alias web 3f9c1a52-...    # name a session
+bridge alias                     # list your aliases
+bridge alias --rm web            # forget one
+```
+
+Aliases are pure local convenience: the router reads the file on each `call`,
+`call_async`, or `text` and swaps the name for the real id before any guardrail
+runs, so nothing else changes. A real session id always wins over an alias
+spelled the same way, and an unknown name is still simply `unreachable`.
+`roster()` reports each session's `alias` (or `null`).
+
 ## How it works
 
 Bridge uses the vendors' live integration surfaces:

@@ -48,6 +48,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_transcript.add_argument("--peer", default=None)
     p_transcript.add_argument("--limit", type=int, default=20)
 
+    # --- post-v1 polish (#5 A+C): aliases and retention ------------------
+    p_alias = sub.add_parser("alias", help="name a session id so you never type a UUID")
+    p_alias.add_argument("name", nargs="?", default=None, help="alias name (omit to list)")
+    p_alias.add_argument("session_id", nargs="?", default=None, help="target Bridge session id")
+    p_alias.add_argument("--rm", action="store_true", help="remove the named alias")
+    # --- end post-v1 polish block ----------------------------------------
+
     # Lifecycle ------------------------------------------------------------
     p_install = sub.add_parser("install", help="install Bridge adapters and guidance")
     p_install.add_argument("--dry-run", action="store_true")
@@ -92,6 +99,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         from .cli_commands import cli_transcript
 
         return cli_transcript(peer=args.peer, limit=args.limit)
+    # --- post-v1 polish (#5 A+C): aliases and retention ------------------
+    if args.command == "alias":
+        from .contacts import cli_alias
+
+        return cli_alias(args.name, args.session_id, rm=args.rm)
+    # --- end post-v1 polish block ----------------------------------------
     if args.command == "claude":
         from .launch import cli_launch_claude
 

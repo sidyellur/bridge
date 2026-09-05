@@ -61,6 +61,10 @@ class RouterConfig:
     queue_cap: int = 20
     timeout_cap_s: int = 60
     hop_budget: int = 1
+    # Transcript/rate retention. Rows older than this are dropped by the
+    # daemon's periodic prune (at most once per ``prune_interval_s``).
+    retention_s: float = 30 * 24 * 3600.0
+    prune_interval_s: float = 3600.0
 
 
 class Notifier(Protocol):
@@ -200,10 +204,35 @@ class Router:
         self.store.record_event("session", "offline", to_id=session_id)
         return {"ok": True}
 
+    # --- aliases (post-v1, optional) ---------------------------------------
+    def resolve_target(self, to: str) -> str:
+        """Map a ``to`` field through the user's contacts file.
+
+        A live session id always wins over an alias spelled the same way, and an
+        unknown name is returned unchanged so the ``unreachable`` guardrail --
+        not this helper -- produces the error. Contacts are re-read per call so
+        the daemon holds no alias state of its own.
+        """
+        from . import contacts
+
+        to = str(to)
+        if self.store.get_session(to) is not None:
+            return to
+        return contacts.resolve(self.paths, to)
+
+    def describe_target(self, to_id: str) -> str:
+        """``alias (id)`` when the user has an alias for ``to_id``, else the id."""
+        from . import contacts
+
+        return contacts.label(self.paths, to_id)
+
     def roster(self, args: dict[str, Any]) -> dict[str, Any]:
+        from . import contacts
+
         include_unmanaged = bool(args.get("include_unmanaged", False))
         caller = args.get("caller")
         sessions = self.store.list_sessions(include_unmanaged=include_unmanaged)
+        aliases = contacts.alias_index(self.paths)
         warnings: list[str] = []
         out = []
         for s in sessions:
@@ -213,6 +242,7 @@ class Router:
             out.append(
                 {
                     "id": s.id,
+                    "alias": aliases.get(s.id),
                     "family": s.family,
                     "state": s.state,
                     "reachable": reachable,

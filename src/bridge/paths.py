@@ -57,6 +57,11 @@ class Paths:
         return self.home / "router.pid"
 
     @property
+    def contacts(self) -> Path:
+        """User-owned alias file (``name -> session id``). Optional; post-v1."""
+        return self.home / "contacts.json"
+
+    @property
     def sessions_dir(self) -> Path:
         return self.home / "sessions"
 
