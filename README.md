@@ -201,6 +201,17 @@ sessions with a human observer and are the remaining release gate, because
 Claude Channels and parts of the Codex App Server are preview/experimental
 interfaces.
 
+`bridge lab` is the harness for that gate. `bridge lab prepare` records the
+installed `claude`/`codex`/`bridge` versions and refuses to open a run while
+`bridge doctor` reports a FAIL; `bridge lab run E|F|G|H` prints the human
+steps, fires each experiment's stimulus through the running router, and reports
+what it observed against an opt-in wire capture (`BRIDGE_LAB_CAPTURE=<dir>`,
+message bodies redacted unless `--full`); `bridge lab verdict E PASS "…"`
+rewrites one `Verdict:` line in place and refuses to write `TBD`; and
+`bridge lab report` exits non-zero while any verdict is unresolved. The harness
+records evidence — it never decides a verdict, so all four stay `TBD` until a
+human runs the procedure on live sessions.
+
 See:
 
 - [Design spec](docs/superpowers/specs/2026-08-26-bridge-design.md)
