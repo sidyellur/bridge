@@ -107,11 +107,26 @@ def test_no_allow_writes_anywhere_in_source():
 
 
 def test_no_forbidden_fallback_in_source():
-    forbidden = ["claude -p", "codex exec", "spool", "carbon-copy", "carbon copy", "warm resume"]
+    # Fallback *invocations* are forbidden anywhere in the source.
+    forbidden = [
+        "claude -p",
+        "codex exec",
+        "carbon-copy",
+        "carbon copy",
+        "warm resume",
+        "exec resume",
+    ]
     for py in SRC.rglob("*.py"):
         text = py.read_text()
         for pattern in forbidden:
             assert pattern not in text, f"forbidden fallback {pattern!r} found in {py}"
+
+    # 'spool' may appear ONLY in install/doctor, and only to remove the obsolete
+    # pre-release spool directory — never in the coordination path.
+    for py in SRC.rglob("*.py"):
+        if py.name in ("install.py", "doctor.py"):
+            continue
+        assert "spool" not in py.read_text(), f"spool referenced in {py}"
 
 
 def test_call_ignores_write_elevation_arguments(router_core):
