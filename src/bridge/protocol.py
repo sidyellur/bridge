@@ -41,6 +41,7 @@ class ConnectionClosed(ProtocolError):
 
 # --- framing ---------------------------------------------------------------
 
+
 def encode_frame(obj: Any) -> bytes:
     body = json.dumps(obj, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
     if len(body) > MAX_FRAME_BYTES:
@@ -80,6 +81,7 @@ class FrameBuffer:
 
 # --- blocking socket helpers ----------------------------------------------
 
+
 def send_frame(sock: socket.socket, obj: Any) -> None:
     sock.sendall(encode_frame(obj))
 
@@ -103,6 +105,7 @@ def recv_frame(sock: socket.socket) -> Any:
 
 
 # --- message constructors --------------------------------------------------
+
 
 def request(req_id: int, op: str, args: dict[str, Any] | None = None) -> dict[str, Any]:
     return {"t": "req", "id": req_id, "op": op, "args": args or {}}
