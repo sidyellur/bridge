@@ -52,7 +52,7 @@ def run(paths: Paths | None = None) -> int:  # pragma: no cover - integration en
     from ..router_client import RouterClient
 
     host_sock = _stdio_socketpair()
-    adapter = ClaudeChannelAdapter(session_id, host_sock)
+    adapter = ClaudeChannelAdapter(session_id, host_sock, paths=paths)
 
     def connect(on_event):
         return RouterClient.connect(paths, session_id=session_id, role="adapter", on_event=on_event)

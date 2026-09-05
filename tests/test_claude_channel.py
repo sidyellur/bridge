@@ -8,6 +8,7 @@ policy-block handling (inbound-unreachable, outbound still works).
 
 from __future__ import annotations
 
+import json
 import socket
 import time
 
@@ -18,9 +19,9 @@ from .fakes.claude_host import FakeClaudeHost
 from .fakes.router_peer import RunningRouter
 
 
-def _make_channel(rr, session_id, *, supports_channel=True, auto_reply=None):
+def _make_channel(rr, session_id, *, supports_channel=True, auto_reply=None, paths=None):
     host_sock, adapter_sock = socket.socketpair()
-    adapter = ClaudeChannelAdapter(session_id, adapter_sock)
+    adapter = ClaudeChannelAdapter(session_id, adapter_sock, paths=paths)
     adapter.connect_router(
         lambda on_event: rr.client(session_id=session_id, role="adapter", on_event=on_event)
     )
@@ -122,7 +123,7 @@ def test_foreign_reply_rejected(paths):
 
 def test_policy_block_keeps_session_inbound_unreachable(paths):
     with RunningRouter(paths) as rr:
-        adapter, host = _make_channel(rr, "claude-1", supports_channel=False)
+        adapter, host = _make_channel(rr, "claude-1", supports_channel=False, paths=paths)
         host.initialize()
         host.initialized()
         time.sleep(0.2)
@@ -135,6 +136,20 @@ def test_policy_block_keeps_session_inbound_unreachable(paths):
         ctrl.call("register_session", {"session_id": "other", "family": "codex", "state": "idle"})
         out = host.call_tool("roster", {})
         assert "sessions" in out["structuredContent"]
+
+        # The policy error is persisted so `bridge doctor` can surface it
+        # without a live adapter connection.
+        meta = json.loads(paths.session_meta("claude-1").read_text())
+        assert meta["policy_error"] == adapter.policy_error
+        assert meta["channel_enabled"] is False
+
+
+def test_policy_error_not_persisted_when_channel_enabled(paths):
+    with RunningRouter(paths) as rr:
+        _adapter, host = _make_channel(rr, "claude-1", paths=paths)
+        host.initialize()
+        host.initialized()
+        assert not paths.session_meta("claude-1").exists()
 
 
 def test_metadata_is_encoded_not_interpolated(paths):

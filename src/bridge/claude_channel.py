@@ -20,6 +20,7 @@ from typing import Any
 
 from . import __version__
 from .mcp import INVALID_PARAMS, RpcEndpoint
+from .paths import Paths
 from .tools import all_tools, dispatch_tool
 
 CHANNEL_NOTIFICATION = "notifications/claude/channel"
@@ -41,7 +42,12 @@ SYSTEM_INSTRUCTIONS = (
 
 class ClaudeChannelAdapter:
     def __init__(
-        self, session_id: str, host_sock: socket.socket, *, cwd: str | None = None
+        self,
+        session_id: str,
+        host_sock: socket.socket,
+        *,
+        cwd: str | None = None,
+        paths: Paths | None = None,
     ) -> None:
         self.session_id = session_id
         self.cwd = cwd or os.getcwd()
@@ -50,6 +56,7 @@ class ClaudeChannelAdapter:
         self.channel_enabled = False
         self.policy_error: str | None = None
         self._client_capabilities: dict[str, Any] = {}
+        self._paths = paths
         self._register_methods()
 
     # --- wiring -------------------------------------------------------------
@@ -102,6 +109,21 @@ class ClaudeChannelAdapter:
                 "organization policy). Outbound Bridge tools still work."
             )
             self.router.call("update_state", {"session_id": self.session_id, "reachable": False})
+            self._persist_policy_error()
+
+    def _persist_policy_error(self) -> None:
+        """Best-effort: record the policy failure to session.json so `bridge
+        doctor` can surface it without a live adapter connection. Never raises
+        -- a session directory Bridge cannot write to must not break the
+        adapter."""
+        paths = self._paths or Paths.resolve()
+        try:
+            paths.ensure_session_dir(self.session_id)
+            paths.session_meta(self.session_id).write_text(
+                json.dumps({"policy_error": self.policy_error, "channel_enabled": False})
+            )
+        except OSError:
+            pass
 
     def _tools_list(self, _params: dict[str, Any]) -> dict[str, Any]:
         return {"tools": all_tools()}
