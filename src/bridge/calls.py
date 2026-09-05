@@ -109,6 +109,7 @@ def do_reply(router: Router, args: dict[str, Any], waiter: Any) -> tuple[str, An
     call_id = _require(args, "call_id")
     answer = str(args.get("answer", ""))[:_MAX_BODY]
     blocked = [str(b) for b in (args.get("blocked") or [])]
+    via = str(args.get("via", "tool"))
 
     call = router.store.get_call(call_id)
     if call is None:
@@ -131,11 +132,18 @@ def do_reply(router: Router, args: dict[str, Any], waiter: Any) -> tuple[str, An
         KIND_CALL, status, from_id=caller, to_id=call.from_id, gist=_gist(answer), call_id=call_id
     )
     result = _result(
-        router, call_id, status, answer, blocked, call.created_at, call.target_state_on_delivery
+        router,
+        call_id,
+        status,
+        answer,
+        blocked,
+        call.created_at,
+        call.target_state_on_delivery,
+        via=via,
     )
 
     if call.kind == "call_async":
-        _push_result(router, call.from_id, call, status)
+        _push_result(router, call.from_id, call, status, via=via)
     else:
         entry = router.pending_sync.pop(call_id, None)
         if entry is not None:
@@ -210,10 +218,11 @@ def _enqueue_call(
     router.pump(to_id)
 
 
-def _push_result(router: Router, caller_id: str, call, status: str) -> None:
+def _push_result(router: Router, caller_id: str, call, status: str, *, via: str = "tool") -> None:
     """Wake the async caller's exact live session with a correlated result."""
     event = result_event(call.call_id, call.question, call.answer, call.blocked)
     event["status"] = status
+    event["via"] = via
     message_id = router._idgen()
     body = {
         "event": event,
@@ -239,6 +248,8 @@ def _result(
     blocked: list[str],
     created_at: float,
     target_state: str | None,
+    *,
+    via: str = "tool",
 ) -> dict[str, Any]:
     return {
         "call_id": call_id,
@@ -249,6 +260,7 @@ def _result(
             "answered_by": "live-session",
             "duration_s": round(router._now() - created_at, 3),
             "target_state_on_delivery": target_state,
+            "via": via,
         },
     }
 
