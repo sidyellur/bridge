@@ -11,10 +11,12 @@ from __future__ import annotations
 
 import shutil
 import stat
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import PROTOCOL_VERSION
+from .claude_probe import ChannelMode, ChannelSupport, detect_channel_mode
 from .install import claude_settings_path, codex_config_path
 from .paths import Paths
 
@@ -58,6 +60,7 @@ def doctor(
     claude_home: Path,
     codex_home: Path,
     check_binaries: bool = True,
+    probe: Callable[[], ChannelMode] | None = None,
 ) -> DoctorReport:
     report = DoctorReport()
 
@@ -96,12 +99,9 @@ def doctor(
         "AGENTS.md",
     )
 
-    # Channel research-preview mode.
-    report.add(
-        "Claude Channel mode",
-        WARN,
-        "research preview: uses the development channel flag; org policy may block inbound",
-    )
+    # Channel mode: detect real support instead of assuming a hard-coded mode.
+    report.add(*_channel_mode_check(probe))
+    report.add(*_policy_check(paths))
 
     # Vendor binaries / remote flags.
     if check_binaries:
@@ -145,6 +145,54 @@ def _check_codex_registration(codex_home: Path) -> tuple[str, str, str]:
     if "[mcp_servers.bridge]" in text:
         return ("Codex MCP registration", OK, "config.toml")
     return ("Codex MCP registration", FAIL, "bridge server not registered")
+
+
+def _channel_mode_check(probe: Callable[[], ChannelMode] | None) -> tuple[str, str, str]:
+    mode = (probe or detect_channel_mode)()
+    if mode.support is ChannelSupport.PLUGIN:
+        return (
+            "Claude Channel mode",
+            OK,
+            f"plugin channel active (claude {mode.version or 'unknown'})",
+        )
+    if mode.support is ChannelSupport.DEVELOPMENT:
+        return (
+            "Claude Channel mode",
+            WARN,
+            f"research preview: development channel flag (claude {mode.version or 'unknown'}); "
+            "organization policy may still block inbound delivery",
+        )
+    detail = f"claude {mode.version or 'not found'}"
+    if mode.detail:
+        detail += f": {mode.detail}"
+    return (
+        "Claude Channel mode",
+        FAIL,
+        f"unsupported ({detail}); this session is inbound-unreachable",
+    )
+
+
+def _policy_check(paths: Paths) -> tuple[str, str, str]:
+    """Surface any persisted ``policy_error`` from known sessions' session.json
+    (written by the Claude Channel adapter when Claude does not negotiate the
+    channel capability). Token-free: reads only what is already on disk."""
+    import json
+
+    sessions_dir = paths.sessions_dir
+    if not sessions_dir.exists():
+        return ("Claude channel policy", OK, "no managed sessions recorded")
+    errors = []
+    for meta_path in sorted(sessions_dir.glob("*/session.json")):
+        try:
+            data = json.loads(meta_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        err = data.get("policy_error")
+        if err:
+            errors.append(f"{meta_path.parent.name}: {err}")
+    if errors:
+        return ("Claude channel policy", WARN, "; ".join(errors))
+    return ("Claude channel policy", OK, "no policy errors recorded")
 
 
 def _has_guidance(path: Path) -> bool:
