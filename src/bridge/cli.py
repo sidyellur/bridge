@@ -53,6 +53,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_alias.add_argument("name", nargs="?", default=None, help="alias name (omit to list)")
     p_alias.add_argument("session_id", nargs="?", default=None, help="target Bridge session id")
     p_alias.add_argument("--rm", action="store_true", help="remove the named alias")
+
+    p_transcript.add_argument(
+        "--prune", action="store_true", help="delete history past the retention window"
+    )
+    p_transcript.add_argument(
+        "--older-than",
+        default=None,
+        metavar="DURATION",
+        help="with --prune: cut off at 7d / 12h / 30m / plain seconds (default 30d)",
+    )
     # --- end post-v1 polish block ----------------------------------------
 
     # Lifecycle ------------------------------------------------------------
@@ -95,16 +105,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         from .cli_commands import cli_call
 
         return cli_call(args.to, args.question, timeout_s=args.timeout)
-    if args.command == "transcript":
-        from .cli_commands import cli_transcript
-
-        return cli_transcript(peer=args.peer, limit=args.limit)
     # --- post-v1 polish (#5 A+C): aliases and retention ------------------
     if args.command == "alias":
         from .contacts import cli_alias
 
         return cli_alias(args.name, args.session_id, rm=args.rm)
+    if args.command == "transcript" and args.prune:
+        from .retention import cli_prune
+
+        return cli_prune(args.older_than)
     # --- end post-v1 polish block ----------------------------------------
+    if args.command == "transcript":
+        from .cli_commands import cli_transcript
+
+        return cli_transcript(peer=args.peer, limit=args.limit)
     if args.command == "claude":
         from .launch import cli_launch_claude
 

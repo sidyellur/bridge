@@ -118,6 +118,8 @@ class Router:
         self.config = config or RouterConfig()
         # call_id -> (waiter, deadline) for synchronous calls awaiting a reply.
         self.pending_sync: dict[str, tuple[Any, float]] = {}
+        # Last retention sweep on the injected clock; None means "never".
+        self._last_prune: float | None = None
 
     @classmethod
     def create(
@@ -310,6 +312,25 @@ class Router:
         from .calls import expire_due
 
         expire_due(self)
+        self.maybe_prune()
+
+    def prune(self, older_than_s: float | None = None) -> dict[str, int]:
+        """Run a retention sweep now and restart the interval timer."""
+        if older_than_s is None:
+            older_than_s = self.config.retention_s
+        self._last_prune = self._now()
+        return self.store.prune(older_than_s)
+
+    def maybe_prune(self) -> dict[str, int] | None:
+        """Sweep at most once per ``prune_interval_s``; ``None`` when skipped.
+
+        The first tick always sweeps, so a router that was down for a month
+        catches up as soon as it comes back rather than waiting an hour.
+        """
+        last = self._last_prune
+        if last is not None and self._now() - last < self.config.prune_interval_s:
+            return None
+        return self.prune()
 
     def has_activity(self) -> bool:
         """True while any managed session is connected or any call is pending."""
@@ -735,3 +756,4 @@ _CALLER_OPS = {"roster", "call", "call_async", "text", "reply", "transcript", "a
 # the bottom so RouterError / register_op / Router are already defined.
 from . import calls as _calls  # noqa: E402,F401
 from . import delivery as _delivery  # noqa: E402,F401
+from . import retention as _retention  # noqa: E402,F401

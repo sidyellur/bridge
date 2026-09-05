@@ -131,6 +131,22 @@ runs, so nothing else changes. A real session id always wins over an alias
 spelled the same way, and an unknown name is still simply `unreachable`.
 `roster()` reports each session's `alias` (or `null`).
 
+### Retention
+
+The audit transcript and the rate counters are history, so the router trims
+them: once an hour it drops transcript rows, rate events, and *resolved* calls
+(with their message/queue rows) older than 30 days. Unresolved calls and events
+still owed to a target are live state and are never removed, however old.
+
+```sh
+bridge transcript --prune                  # apply the 30-day window now
+bridge transcript --prune --older-than 7d  # or 12h, 30m, or plain seconds
+```
+
+Pruning normally runs through the router so the daemon stays the single writer.
+If the router is not running there is no writer to contend with, so the command
+opens the database directly and says so.
+
 ## How it works
 
 Bridge uses the vendors' live integration surfaces:
