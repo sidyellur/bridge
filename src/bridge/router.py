@@ -42,6 +42,7 @@ from .protocol import (
 )
 from .store import (
     STATE_OFFLINE,
+    STATE_STARTING,
     Store,
 )
 
@@ -169,7 +170,7 @@ class Router:
     def update_state(self, args: dict[str, Any]) -> dict[str, Any]:
         session_id = require_field(args, "session_id")
         if "state" in args:
-            self.store.set_state(session_id, args["state"])
+            self._transition(session_id, str(args["state"]))
         if "reachable" in args:
             new_reachable = bool(args["reachable"])
             if not new_reachable:
@@ -189,6 +190,32 @@ class Router:
         # Becoming idle may release a queued delivery.
         self.pump(session_id)
         return {"ok": True}
+
+    def _transition(self, session_id: str, state: str) -> None:
+        """Move a session to ``state``, rejecting transitions the registry's
+        lifecycle graph does not allow.
+
+        This is the daemon-side enforcement of :func:`registry.is_valid_transition`
+        (previously advisory only). An unknown session has no prior state to
+        move from, so it is validated against ``starting``. Rejections are
+        recorded in the transcript like any other refusal.
+        """
+        from .registry import is_valid_transition
+
+        current = self.store.get_session(session_id)
+        current_state = current.state if current is not None else STATE_STARTING
+        if not is_valid_transition(current_state, state):
+            self.store.record_event(
+                "session",
+                "rejected",
+                to_id=session_id,
+                gist=f"bad transition {current_state} -> {state}",
+            )
+            raise RouterError(
+                "bad_transition",
+                f"session {session_id!r} cannot move from {current_state!r} to {state!r}",
+            )
+        self.store.set_state(session_id, state)
 
     def heartbeat(self, args: dict[str, Any]) -> dict[str, Any]:
         self.store.touch(require_field(args, "session_id"))
