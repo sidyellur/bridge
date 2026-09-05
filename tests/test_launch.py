@@ -125,9 +125,7 @@ def test_run_wrapper_passes_identity_and_exit_code(paths, tmp_path, ids):
             env=env,
             new_id=ids.new,
             ensure_running=lambda p: None,
-            connect=lambda paths, session_id, role: rr.client(
-                session_id=session_id, role=role
-            ),
+            connect=lambda paths, session_id, role: rr.client(session_id=session_id, role=role),
             forward_signals=False,
             print_address=False,
         )
@@ -156,9 +154,7 @@ def test_run_wrapper_codex_builds_remote_socket(paths, tmp_path, ids):
             env=env,
             new_id=ids.new,
             ensure_running=lambda p: None,
-            connect=lambda paths, session_id, role: rr.client(
-                session_id=session_id, role=role
-            ),
+            connect=lambda paths, session_id, role: rr.client(session_id=session_id, role=role),
             forward_signals=False,
             print_address=False,
         )
@@ -191,9 +187,7 @@ def test_run_wrapper_uses_spawn_injection(paths, ids):
             new_id=ids.new,
             spawn=fake_spawn,
             ensure_running=lambda p: None,
-            connect=lambda paths, session_id, role: rr.client(
-                session_id=session_id, role=role
-            ),
+            connect=lambda paths, session_id, role: rr.client(session_id=session_id, role=role),
             forward_signals=False,
             print_address=False,
         )

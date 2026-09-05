@@ -57,8 +57,7 @@ def cli_roster(*, include_unmanaged: bool = False, as_json: bool = False) -> int
     paths = Paths.resolve()
     if not is_running(paths):
         print(
-            "bridge router is not running;"
-            " start a session with `bridge claude` or `bridge codex`"
+            "bridge router is not running; start a session with `bridge claude` or `bridge codex`"
         )
         return 1
     try:

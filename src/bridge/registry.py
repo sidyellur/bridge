@@ -76,9 +76,7 @@ class Registry:
         )
 
     def set_last_user_message(self, session_id: str, message: str) -> None:
-        self._client.call(
-            "update_state", {"session_id": session_id, "last_user_message": message}
-        )
+        self._client.call("update_state", {"session_id": session_id, "last_user_message": message})
 
     def mark_offline(self, session_id: str) -> None:
         try:
@@ -88,6 +86,7 @@ class Registry:
 
 
 # --- store-side maintenance ------------------------------------------------
+
 
 def sweep_stale(store: Store, *, ttl_s: float, now: float) -> list[str]:
     """Offline any managed session that is not reachable and has not been active

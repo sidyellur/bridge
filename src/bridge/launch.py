@@ -36,6 +36,7 @@ FORWARDED_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGWINCH, signal.SIGH
 
 # --- identity + command construction (pure) --------------------------------
 
+
 def build_identity_env(
     paths: Paths, session_id: str, base_env: dict[str, str] | None = None
 ) -> dict[str, str]:
@@ -106,6 +107,7 @@ def resolve_binary(family: str, env: dict[str, str] | None = None) -> str:
 
 # --- signal forwarding -----------------------------------------------------
 
+
 @dataclass
 class SignalForwarder:
     """Forwards a set of signals to a child process while installed."""
@@ -137,6 +139,7 @@ class SignalForwarder:
 
 
 # --- runner ----------------------------------------------------------------
+
 
 @dataclass
 class LaunchResult:
@@ -224,6 +227,7 @@ def cli_launch_codex(args: Sequence[str]) -> int:  # pragma: no cover - thin shi
 
 
 # --- helpers ---------------------------------------------------------------
+
 
 def _has_flag(args: Sequence[str], flag: str) -> bool:
     return any(a == flag or a.startswith(flag + "=") for a in args)
