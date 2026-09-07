@@ -17,6 +17,11 @@ subscribe is tolerated rather than fatal: the global ``thread/started`` and
 ``thread/status/changed`` broadcasts still arrive (busy/idle keeps working) and
 only the per-thread ``turn/*``/``item/*`` stream is lost.
 
+Codex also spawns short-lived ``threadSource=="system"`` / ``ephemeral=true``
+side-threads in the TUI's own cwd right after a user turn (observed doing
+thread naming); Bridge must never bind to one, nor rebind away from a bound
+user thread because one broadcasts — see :func:`is_bindable_thread`.
+
 The pinned contract lives in
 ``tests/fixtures/codex_protocol/codex-0.151.0.json``. The constants below are
 the single source of truth for every wire name: the fake server in
@@ -93,6 +98,25 @@ THREAD_STATUS_NOT_LOADED = "notLoaded"
 THREAD_STATUS_IDLE = "idle"
 THREAD_STATUS_ACTIVE = "active"
 THREAD_STATUS_SYSTEM_ERROR = "systemError"
+
+#: The only ``threadSource`` a thread Bridge may bind to carries. Codex's
+#: ephemeral system side-threads (thread naming, etc.) carry ``"system"``.
+THREAD_SOURCE_USER = "user"
+
+
+def is_bindable_thread(thread: Mapping[str, Any]) -> bool:
+    """Whether ``thread`` is eligible for Bridge to bind or rebind to.
+
+    Excludes Codex's ephemeral ``threadSource=="system"`` side-threads (see
+    the module docstring). Missing ``ephemeral``/``threadSource`` fields count
+    as bindable, for forward-compat with servers that predate them. Pure: safe
+    to call from a notification handler, which may never issue a request.
+    """
+    return (
+        thread.get("ephemeral") is not True
+        and thread.get("threadSource", THREAD_SOURCE_USER) == THREAD_SOURCE_USER
+    )
+
 
 STATUS_IDLE = "idle"
 STATUS_WORKING = "working"
@@ -319,7 +343,11 @@ class CodexAppServerClient:
             except JsonRpcError:
                 continue
             thread = result.get("thread") if isinstance(result, Mapping) else None
-            if isinstance(thread, Mapping) and thread.get("id") not in self.own_thread_ids:
+            if (
+                isinstance(thread, Mapping)
+                and thread.get("id") not in self.own_thread_ids
+                and is_bindable_thread(thread)
+            ):
                 candidates.append(dict(thread))
         if not candidates:
             return self.thread_id
@@ -409,6 +437,8 @@ class CodexAppServerClient:
             return
         thread_id = thread.get("id")
         if not thread_id or thread_id in self.own_thread_ids:
+            return
+        if not is_bindable_thread(thread):
             return
         # Last wins in our own cwd: the operator restarting the TUI there is
         # rebinding, not opening a second session Bridge should ignore.

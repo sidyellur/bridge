@@ -38,11 +38,13 @@ from bridge.codex_app_server import (
     SERVER_NOTIFICATIONS,
     STATUS_IDLE,
     STATUS_WORKING,
+    THREAD_SOURCE_USER,
     THREAD_STATUS_ACTIVE,
     THREAD_STATUS_TO_STATE,
     CodexAppServerClient,
     CodexThreadBusy,
     UnsupportedCodexVersion,
+    is_bindable_thread,
     parse_codex_version,
 )
 from bridge.mcp import INTERNAL_ERROR, METHOD_NOT_FOUND, JsonRpcError
@@ -140,6 +142,11 @@ def test_pinned_contract_matches_the_fixture():
     assert CONTRACT["bridge_state_map"] == THREAD_STATUS_TO_STATE
     assert tuple(CONTRACT["min_codex_version"]) == MIN_CODEX_VERSION
     assert CONTRACT["codex_version"] == PINNED_CODEX_VERSION
+    assert THREAD_SOURCE_USER == "user"
+    assert (
+        CONTRACT["thread_discovery"]["bindable_thread_rule"]
+        == "ephemeral is not true and threadSource == user"
+    )
 
 
 # --- initialize ------------------------------------------------------------
@@ -328,6 +335,51 @@ def test_a_thread_in_another_cwd_does_not_rebind(client_pair):
 
     assert client.thread_id == "t1"
     assert rec.bound == ["t1"]
+
+
+def test_ephemeral_system_thread_does_not_rebind(client_pair):
+    """The 2026-09-07 spike: right after a user turn, the App Server broadcasts
+    a second, ephemeral `threadSource=="system"` thread/started in the TUI's
+    own cwd (thread naming). Bridge must not rebind to it, and turns must keep
+    targeting the real user thread."""
+    client, fake, rec = client_pair(eager_thread=False, client_cwd="/work/mine")
+    client.initialize()
+    fake.start_thread("t-user", "/work/mine")
+    assert _wait(lambda: client.thread_id == "t-user")
+    rec.bound.clear()
+
+    fake.start_thread("t-side", "/work/mine", thread_source="system", ephemeral=True)
+    _sync(client)
+
+    assert client.thread_id == "t-user"
+    assert rec.bound == []
+
+    client.start_turn("hello")
+    assert fake.turns[-1]["threadId"] == "t-user"
+
+
+def test_bind_seed_ignores_ephemeral_system_threads(client_pair):
+    client, fake, _rec = client_pair(eager_thread=False, client_cwd="/work/mine")
+    client.initialize()
+    fake.start_thread("t-side", "/work/mine", thread_source="system", ephemeral=True)
+    _sync(client)
+    client.thread_id = None
+
+    assert client.bind_thread() is None
+    assert client.thread_id is None
+
+    fake.start_thread("t-user", "/work/mine")
+    assert _wait(lambda: client.thread_id == "t-user")
+
+
+def test_missing_thread_source_and_ephemeral_are_still_bindable():
+    assert is_bindable_thread({"id": "t1", "cwd": "/work/mine"}) is True
+    assert is_bindable_thread({"id": "t1", "cwd": "/work/mine", "ephemeral": False}) is True
+    assert (
+        is_bindable_thread({"id": "t1", "cwd": "/work/mine", "threadSource": "user"}) is True
+    )
+    assert is_bindable_thread({"id": "t1", "ephemeral": True}) is False
+    assert is_bindable_thread({"id": "t1", "threadSource": "system"}) is False
 
 
 # --- subscribe -------------------------------------------------------------

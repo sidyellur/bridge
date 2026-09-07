@@ -36,6 +36,7 @@ from bridge.codex_app_server import (
     N_TURN_COMPLETED,
     N_TURN_STARTED,
     PINNED_CODEX_VERSION,
+    THREAD_SOURCE_USER,
     THREAD_STATUS_ACTIVE,
     THREAD_STATUS_IDLE,
 )
@@ -146,7 +147,15 @@ class FakeCodexAppServer:
             self.start_thread(self.thread_id, self.cwd)
 
     # --- threads ------------------------------------------------------------
-    def _thread_obj(self, thread_id: str, cwd: str, status: dict) -> dict:
+    def _thread_obj(
+        self,
+        thread_id: str,
+        cwd: str,
+        status: dict,
+        *,
+        thread_source: str = THREAD_SOURCE_USER,
+        ephemeral: bool = False,
+    ) -> dict:
         seconds = self._now_ms() // 1000
         return {
             "id": thread_id,
@@ -156,7 +165,8 @@ class FakeCodexAppServer:
             "createdAt": seconds,
             "updatedAt": seconds,
             "source": "vscode",
-            "threadSource": "user",
+            "threadSource": thread_source,
+            "ephemeral": ephemeral,
             "cliVersion": self.codex_version,
             "name": None,
             "preview": "",
@@ -165,8 +175,21 @@ class FakeCodexAppServer:
             "turns": [],
         }
 
-    def start_thread(self, thread_id: str, cwd: str) -> dict:
-        thread = self._thread_obj(thread_id, cwd, {"type": THREAD_STATUS_IDLE})
+    def start_thread(
+        self,
+        thread_id: str,
+        cwd: str,
+        *,
+        thread_source: str = THREAD_SOURCE_USER,
+        ephemeral: bool = False,
+    ) -> dict:
+        thread = self._thread_obj(
+            thread_id,
+            cwd,
+            {"type": THREAD_STATUS_IDLE},
+            thread_source=thread_source,
+            ephemeral=ephemeral,
+        )
         with self._lock:
             self.threads.append(thread)
         self._notify(N_THREAD_STARTED, {"thread": thread})

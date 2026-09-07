@@ -69,7 +69,16 @@
     "ThreadStatus.active_extra_fields": ["activeFlags"],
     "ThreadActiveFlag": ["waitingOnApproval", "waitingOnUserInput"],
     "AgentMessageThreadItem": { "type": "agentMessage", "required": ["id", "type", "text"] },
-    "Thread.required_subset": ["id", "status", "cwd", "createdAt", "source", "cliVersion"]
+    "Thread.required_subset": [
+      "id",
+      "status",
+      "cwd",
+      "createdAt",
+      "source",
+      "cliVersion",
+      "threadSource",
+      "ephemeral"
+    ]
   },
   "thread_discovery": {
     "tui_thread_is_created_eagerly_on_tui_launch": true,
@@ -78,7 +87,9 @@
     "subscribe_verb": "thread/resume",
     "no_subscribe_method_exists": true,
     "turn_and_item_notifications_are_subscriber_only": true,
-    "thread_status_changed_is_global_broadcast": true
+    "thread_status_changed_is_global_broadcast": true,
+    "bindable_thread_rule": "ephemeral is not true and threadSource == user",
+    "codex_spawns_ephemeral_system_threads_after_user_turns": true
   },
   "known_broken_0_151_0": {
     "thread/resume": "-32601 'list_turns is not supported yet' for historyMode=paginated threads, with or without excludeTurns; also -32600 'no rollout found' for threads with no persisted content",
