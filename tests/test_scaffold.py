@@ -51,6 +51,14 @@ def test_paths_resolution_precedence(tmp_path: Path):
     assert Paths.resolve(env=env2).home == tmp_path / "userhome" / ".bridge"
 
 
+def test_default_paths_resolution_never_reaches_the_real_bridge_home(tmp_path: Path):
+    """The suite must not be able to touch the user's install even when a code
+    path forgets to inject ``paths`` (the autouse BRIDGE_HOME fixture)."""
+    resolved = Paths.resolve()
+    assert tmp_path in resolved.home.parents
+    assert resolved.home != Path.home() / ".bridge"
+
+
 def test_paths_ensure_permissions(paths: Paths):
     assert paths.home.is_dir()
     assert paths.sessions_dir.is_dir()

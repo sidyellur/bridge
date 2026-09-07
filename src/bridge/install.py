@@ -12,12 +12,21 @@ unless a purge is requested.
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import stat
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .claude_probe import ChannelMode, ChannelSupport, detect_channel_mode
+from .claude_probe import (
+    DEV_CHANNEL_SPEC,
+    DEV_CHANNELS_FLAG,
+    ChannelMode,
+    ChannelSupport,
+    detect_channel_mode,
+)
 from .launch import CLAUDE_CHANNEL_ARGS_FILE
 from .paths import Paths
 from .router import read_token
@@ -45,11 +54,25 @@ listed by `roster` — a real Claude or Codex session, never a fresh stand-in.
   change files or run commands solely because of an inbound call.
 """
 
-CODEX_MCP_BLOCK = """\
-[mcp_servers.bridge]
-command = "bridge"
-args = ["serve", "--family", "codex"]
-"""
+NOT_ON_PATH_NOTE = (
+    'bridge is not on PATH: registered the bare command "bridge"; sessions cannot spawn '
+    "the Bridge server until it resolves (e.g. symlink it into ~/.local/bin)"
+)
+LEGACY_SETTINGS_NOTE = (
+    "legacy registration in settings.json removed (Claude Code reads ~/.claude.json)"
+)
+
+
+class InstallError(Exception):
+    """A vendor config cannot be updated safely; the install is refused."""
+
+
+def codex_mcp_block(command: str) -> str:
+    return (
+        "[mcp_servers.bridge]\n"
+        f"command = {json.dumps(command)}\n"
+        'args = ["serve", "--family", "codex"]\n'
+    )
 
 
 @dataclass
@@ -72,12 +95,27 @@ class InstallReport:
         return "\n".join(lines)
 
 
-def claude_settings_path(claude_home: Path) -> Path:
+def claude_mcp_config_path(claude_home: Path) -> Path:
+    """Where Claude Code reads user-scope MCP servers: the top-level
+    ``mcpServers`` object of ``~/.claude.json``, not ``~/.claude/settings.json``."""
+    return claude_home.parent / ".claude.json"
+
+
+def claude_legacy_settings_path(claude_home: Path) -> Path:
     return claude_home / "settings.json"
 
 
 def codex_config_path(codex_home: Path) -> Path:
     return codex_home / "config.toml"
+
+
+def default_bridge_executable() -> str:
+    """The absolute path of the running ``bridge`` command when it can be
+    determined, so a venv install is spawnable without being on PATH."""
+    argv0 = Path(sys.argv[0]) if sys.argv and sys.argv[0] else None
+    if argv0 is not None and argv0.name == "bridge" and argv0.exists():
+        return str(argv0.resolve())
+    return shutil.which("bridge") or "bridge"
 
 
 def install(
@@ -87,8 +125,11 @@ def install(
     codex_home: Path,
     dry_run: bool = False,
     probe: Callable[[], ChannelMode] | None = None,
+    bridge_executable: str | None = None,
+    which: Callable[[str], str | None] = shutil.which,
 ) -> InstallReport:
     report = InstallReport(dry_run=dry_run)
+    command = bridge_executable or default_bridge_executable()
 
     # 1. Router state with user-only permissions.
     if not dry_run:
@@ -106,16 +147,26 @@ def install(
 
     # 3. Claude MCP registration (combined channel/tool server).
     claude_home.mkdir(parents=True, exist_ok=True)
-    settings = claude_settings_path(claude_home)
+    mcp_config = claude_mcp_config_path(claude_home)
     if not dry_run:
-        _merge_json_mcp(settings, "claude")
-    report.touched.append(settings)
+        _merge_json_mcp(mcp_config, "claude", command)
+    report.touched.append(mcp_config)
+
+    legacy = claude_legacy_settings_path(claude_home)
+    if _has_json_mcp_bridge(legacy):
+        if not dry_run:
+            _remove_json_mcp(legacy)
+        report.removed.append(legacy)
+        report.notes.append(LEGACY_SETTINGS_NOTE)
+
+    if command == "bridge" and which("bridge") is None:
+        report.notes.append(NOT_ON_PATH_NOTE)
 
     # 4. Codex MCP registration.
     codex_home.mkdir(parents=True, exist_ok=True)
     codex_cfg = codex_config_path(codex_home)
     if not dry_run:
-        _upsert_block(codex_cfg, TOML_BEGIN, TOML_END, CODEX_MCP_BLOCK)
+        _upsert_block(codex_cfg, TOML_BEGIN, TOML_END, codex_mcp_block(command))
     report.touched.append(codex_cfg)
 
     # 5. Coordination guidance in CLAUDE.md and AGENTS.md.
@@ -134,6 +185,12 @@ def install(
         if not dry_run:
             _write_channel_args(channel_args_path, mode.launch_args)
         report.touched.append(channel_args_path)
+    elif channel_args_path.exists():
+        # A flag this `claude` rejects would kill the wrapper on every launch.
+        if not dry_run:
+            _remove(channel_args_path)
+        report.removed.append(channel_args_path)
+        report.notes.append("stale channel launch args removed")
     if mode.support is ChannelSupport.PLUGIN:
         report.notes.append(
             f"Claude Channel mode: plugin (claude {mode.version or 'unknown'}); "
@@ -141,18 +198,17 @@ def install(
         )
     elif mode.support is ChannelSupport.DEVELOPMENT:
         report.notes.append(
-            "Claude Channel mode: development (research preview) "
-            f"(claude {mode.version or 'unknown'}); launching with the development "
-            "channel flag. Organization policy may still block inbound delivery; "
-            "run `bridge doctor` to check."
+            "Claude Channel mode: development (research preview, claude "
+            f"{mode.version or 'unknown'}): launching with {DEV_CHANNELS_FLAG} "
+            f"{DEV_CHANNEL_SPEC}. Claude asks once at startup to confirm the "
+            "development channel; organization policy may still block inbound "
+            "delivery (bridge doctor reports this as a warning)."
         )
     else:
-        detail = f" ({mode.detail})" if mode.detail else ""
+        detail = mode.detail or f"claude {mode.version or 'not found'}"
         report.notes.append(
-            "Claude channel unsupported"
-            f" (claude {mode.version or 'not found'}){detail}: this session will be "
-            "inbound-unreachable until Claude Code Channels are available. "
-            "Outbound Bridge tools still work."
+            f"Claude channel unsupported ({detail}): this session will be "
+            "inbound-unreachable. Outbound Bridge tools still work."
         )
     report.notes.append("no Claude prompt hooks installed")
     return report
@@ -179,9 +235,12 @@ def uninstall(
         report.notes.append(f"transcripts kept at {paths.db} (use --purge to delete)")
 
     # Config edits.
-    settings = claude_settings_path(claude_home)
-    if settings.exists() and _remove_json_mcp(settings):
-        report.removed.append(settings)
+    for json_config in (
+        claude_mcp_config_path(claude_home),
+        claude_legacy_settings_path(claude_home),
+    ):
+        if json_config.exists() and _remove_json_mcp(json_config):
+            report.removed.append(json_config)
     for md, begin, end in (
         (claude_home / "CLAUDE.md", MD_BEGIN, MD_END),
         (codex_home / "AGENTS.md", MD_BEGIN, MD_END),
@@ -195,17 +254,49 @@ def uninstall(
 # --- helpers ---------------------------------------------------------------
 
 
-def _merge_json_mcp(path: Path, family: str) -> None:
-    data = {}
+def _merge_json_mcp(path: Path, family: str, command: str) -> None:
+    data: dict = {}
     if path.exists():
         try:
             data = json.loads(path.read_text())
-        except json.JSONDecodeError:
-            data = {}
+        except json.JSONDecodeError as exc:
+            # ~/.claude.json is the user's own Claude Code state; resetting it
+            # to {} to make room for our key would destroy it.
+            raise InstallError(
+                f"{path} is not valid JSON ({exc}); fix or move it, then re-run `bridge install`"
+            ) from exc
+        if not isinstance(data, dict):
+            raise InstallError(
+                f"{path} is not a JSON object; fix or move it, then re-run `bridge install`"
+            )
     servers = data.setdefault("mcpServers", {})
-    servers["bridge"] = {"command": "bridge", "args": ["serve", "--family", family]}
-    path.write_text(json.dumps(data, indent=2) + "\n")
+    servers["bridge"] = {
+        "type": "stdio",
+        "command": command,
+        "args": ["serve", "--family", family],
+    }
+    _write_json_atomic(path, data)
+
+
+def _write_json_atomic(path: Path, data: dict) -> None:
+    """Truncating ``path`` in place would leave the user's Claude Code state
+    empty or half-written if we die mid-write — or if a live Claude Code reads
+    it in that window — so publish the new content with an atomic rename."""
+    tmp = path.with_name(path.name + ".bridge-tmp")
+    tmp.write_text(json.dumps(data, indent=2) + "\n")
+    _chmod_600(tmp)
+    os.replace(tmp, path)
     _chmod_600(path)
+
+
+def _has_json_mcp_bridge(path: Path) -> bool:
+    if not path.exists():
+        return False
+    try:
+        data = json.loads(path.read_text())
+    except json.JSONDecodeError:
+        return False
+    return isinstance(data, dict) and "bridge" in data.get("mcpServers", {})
 
 
 def _remove_json_mcp(path: Path) -> bool:
@@ -213,12 +304,14 @@ def _remove_json_mcp(path: Path) -> bool:
         data = json.loads(path.read_text())
     except json.JSONDecodeError:
         return False
+    if not isinstance(data, dict):
+        return False
     servers = data.get("mcpServers", {})
     if "bridge" in servers:
         del servers["bridge"]
         if not servers:
             data.pop("mcpServers", None)
-        path.write_text(json.dumps(data, indent=2) + "\n")
+        _write_json_atomic(path, data)
         return True
     return False
 
@@ -262,8 +355,6 @@ def _write_channel_args(path: Path, args: list[str]) -> None:
 
 def _remove(path: Path) -> None:
     if path.is_dir():
-        import shutil
-
         shutil.rmtree(path)
     else:
         path.unlink()
@@ -279,23 +370,26 @@ def _chmod_600(path: Path) -> None:
 # --- CLI shims -------------------------------------------------------------
 
 
-def cli_install(dry_run: bool = False) -> int:  # pragma: no cover - thin shim
-    import os
-
+def cli_install(dry_run: bool = False) -> int:
     paths = Paths.resolve()
-    claude_home = Path(os.environ.get("HOME", str(Path.home()))) / ".claude"
-    codex_home = Path(os.environ.get("HOME", str(Path.home()))) / ".codex"
-    report = install(paths=paths, claude_home=claude_home, codex_home=codex_home, dry_run=dry_run)
+    home = Path(os.environ.get("HOME", str(Path.home())))
+    try:
+        report = install(
+            paths=paths,
+            claude_home=home / ".claude",
+            codex_home=home / ".codex",
+            dry_run=dry_run,
+        )
+    except InstallError as exc:
+        print(f"bridge install: {exc}", file=sys.stderr)
+        return 1
     print(report.render())
     return 0
 
 
 def cli_uninstall() -> int:  # pragma: no cover - thin shim
-    import os
-
     paths = Paths.resolve()
-    claude_home = Path(os.environ.get("HOME", str(Path.home()))) / ".claude"
-    codex_home = Path(os.environ.get("HOME", str(Path.home()))) / ".codex"
-    report = uninstall(paths=paths, claude_home=claude_home, codex_home=codex_home)
+    home = Path(os.environ.get("HOME", str(Path.home())))
+    report = uninstall(paths=paths, claude_home=home / ".claude", codex_home=home / ".codex")
     print(report.render())
     return 0

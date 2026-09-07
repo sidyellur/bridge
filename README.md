@@ -32,6 +32,17 @@ permissions, and appends sentinel-fenced guidance to `~/.claude/CLAUDE.md` and
 `~/.codex/AGENTS.md` without clobbering existing content. It installs **no**
 prompt hooks and reports every file it touches. Undo with `bridge uninstall`.
 
+The Claude server goes into the top-level `mcpServers` object of
+`~/.claude.json` — the file Claude Code reads for **user-scope** MCP servers —
+under the name `bridge`, and every other key in that file is preserved. (If
+`~/.claude.json` does not parse, `bridge install` refuses rather than resetting
+your Claude Code state.) Both registrations use the **absolute path** of the
+`bridge` executable, so a virtualenv install works without `bridge` being on
+`PATH`; if only the bare name can be resolved, install says so. `bridge doctor`
+verifies that the registered command still exists and is executable (or, for a
+bare name, still resolves on `PATH`), and warns about a stale `bridge` entry
+left behind in the older `~/.claude/settings.json` location.
+
 ### Channel modes
 
 `bridge install` runs a token-free probe (`claude --version` / `claude --help`,
@@ -41,21 +52,35 @@ finds, instead of assuming a fixed mode:
 - **`plugin`** — your `claude` advertises a channel marketplace/allowlist. The
   wrapper launches with `--channels plugin:bridge@<marketplace>`. This is the
   fully-supported path; `bridge doctor` reports it `[ok]`.
-- **`development`** — `claude` only exposes the Channels *research-preview*
-  development flag. The wrapper still launches with the channel enabled, but
-  `bridge doctor` reports it `[warn]`: your organization's policy may still
-  reject inbound events even though the flag is accepted locally.
-- **`unsupported`** — no channel support was detected at all (old `claude`
-  version, or the binary isn't found). Bridge writes no channel flag; the
+- **`development`** — Claude Code Channels are still a *research preview*, and
+  during the preview the channel flags are deliberately absent from
+  `claude --help` even though the binary accepts them. Bridge therefore
+  classifies this mode by version — `claude` 2.1.234 or newer — rather than by
+  grepping the help text. The wrapper launches with
+  `--dangerously-load-development-channels server:bridge` (`bridge` is the key
+  `bridge install` registers Bridge's MCP server under), and `claude` shows a
+  one-time confirmation for the development channel at startup. `bridge doctor`
+  reports it `[warn]`: your organization's policy may still reject inbound
+  events even though the flag is accepted locally.
+- **`unsupported`** — `claude` older than 2.1.234, an unparsable version, or
+  the binary isn't found. Bridge writes no channel flag; the
   session launches normally but is **inbound-unreachable** — `call`/`text`
   aimed at it return `unreachable`. Outbound Bridge tools from that session
   still work. `bridge doctor` reports this `[fail]` so it isn't missed.
 
 `bridge claude` prints the detected mode to stderr once at startup, right
 after the session address. Re-run `bridge install` after upgrading `claude` to
-re-detect and pick up a better mode. `bridge doctor` also surfaces any
-organization-policy rejection a session recorded when it tried to negotiate
-the channel capability, under **Claude channel policy**.
+re-detect and pick up a better mode. Claude Code never tells a server that it
+declined to load it as a channel — unregistered channels drop events silently —
+so **Claude channel handshake** in `bridge doctor` reports which live sessions
+completed the MCP initialize handshake with Bridge. `bridge claude` records
+every session it launches, so a session warned about there never completed that
+initialize with Bridge — it may have been quit immediately, or the server may be
+disabled for it. When that row warns — or events never arrive despite a recorded
+handshake — check the channels notice `claude` prints at startup: it names the
+channels it loaded and is the only place an allowlist or organization-policy
+rejection is visible. Run `bridge install` with Claude Code closed: it rewrites
+`~/.claude.json`.
 
 ## Launch flow
 
@@ -217,10 +242,15 @@ service.
 
 Run `bridge doctor`. It checks socket/token ownership and permissions, MCP
 registration on both families, the coordination guidance, the detected Claude
-Channel mode (see [Channel modes](#channel-modes) above) and any persisted
-organization-policy rejection, vendor binaries, absence of obsolete artifacts,
+Channel mode (see [Channel modes](#channel-modes) above) and the recorded
+channel handshakes, vendor binaries, absence of obsolete artifacts,
 and runs a token-free local loopback protocol probe (it never spends model
 tokens).
+
+If `claude` starts rejecting the channel flag (for example once the research
+preview ends and the flag is removed), re-run `bridge install` — it re-detects
+the mode and clears the stale launch args — or delete
+`~/.bridge/claude_channel_args.json` yourself.
 
 ## Status
 

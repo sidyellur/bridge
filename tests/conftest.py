@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from bridge.paths import Paths
+from bridge.paths import BRIDGE_HOME_ENV, Paths
 
 from .fakes.clock import FrozenClock
 from .fakes.ids import SeededIds
@@ -76,6 +76,13 @@ def running_router(paths: Paths, clock: FrozenClock, ids: SeededIds) -> Iterator
 
     with RunningRouter(paths, now=clock.now, new_id=ids.new) as rr:
         yield rr
+
+
+@pytest.fixture(autouse=True)
+def _no_real_bridge_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Root every unset-``paths`` resolution in the test's temp dir, so a missing
+    injection can never touch the user's real ``~/.bridge``."""
+    monkeypatch.setenv(BRIDGE_HOME_ENV, str(tmp_path / "resolved-bridge-home"))
 
 
 @pytest.fixture(autouse=True)

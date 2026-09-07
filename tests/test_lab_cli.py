@@ -110,9 +110,9 @@ def _wait_reachable(client, sid, *, state=None, timeout=3.0) -> bool:
     return False
 
 
-def _make_claude(rr, session_id, *, auto_reply=None):
+def _make_claude(rr, paths, session_id, *, auto_reply=None):
     host_sock, adapter_sock = socket.socketpair()
-    adapter = ClaudeChannelAdapter(session_id, adapter_sock)
+    adapter = ClaudeChannelAdapter(session_id, adapter_sock, paths=paths)
     adapter.connect_router(
         lambda on_event: rr.client(session_id=session_id, role="adapter", on_event=on_event)
     )
@@ -243,7 +243,7 @@ def _summary(run_dir: Path, name: str) -> dict:
 def test_run_e_sees_the_channel_notification_and_the_reply(paths, run_dir):
     out = Out()
     with RunningRouter(paths) as rr:
-        adapter, host = _make_claude(rr, "claude-1", auto_reply="experiment E ok")
+        adapter, host = _make_claude(rr, paths, "claude-1", auto_reply="experiment E ok")
         try:
             ctrl = rr.client(session_id="ctrl")
             assert _wait_reachable(ctrl, "claude-1")
@@ -272,7 +272,7 @@ def test_run_e_sees_the_channel_notification_and_the_reply(paths, run_dir):
 def test_run_e_fails_when_nobody_replies(paths, run_dir):
     out = Out()
     with RunningRouter(paths) as rr:
-        adapter, host = _make_claude(rr, "claude-1")  # no auto_reply
+        adapter, host = _make_claude(rr, paths, "claude-1")  # no auto_reply
         try:
             ctrl = rr.client(session_id="ctrl")
             assert _wait_reachable(ctrl, "claude-1")
@@ -468,6 +468,116 @@ def test_run_g_hard_fails_on_any_turn_steer_frame(paths, run_dir):
     assert _summary(run_dir, "G")["steer_frames"] == 1
 
 
+def test_run_g_targets_the_explicit_claude_id_even_with_a_reachable_codex_session(paths, run_dir):
+    out = Out()
+    with RunningRouter(paths) as rr:
+        claude_adapter, claude_host = _make_claude(rr, paths, "claude-1")
+        codex_adapter, codex_server = _make_codex(rr, "codex-1")
+        try:
+            ctrl = rr.client(session_id="ctrl")
+            assert _wait_reachable(ctrl, "claude-1")
+            assert _wait_reachable(ctrl, "codex-1", state="idle")
+
+            ctrl.call("update_state", {"session_id": "claude-1", "state": "working"})
+            deadline = time.time() + 3.0
+            while time.time() < deadline:
+                entry = next(
+                    s for s in ctrl.call("roster", {})["sessions"] if s["id"] == "claude-1"
+                )
+                if entry["state"] == "working":
+                    break
+                time.sleep(0.02)
+
+            releaser = threading.Timer(
+                0.4,
+                lambda: ctrl.call("update_state", {"session_id": "claude-1", "state": "idle"}),
+            )
+            releaser.start()
+            try:
+                rc = lab_run(
+                    "G",
+                    run_dir=run_dir,
+                    claude_id="claude-1",
+                    timeout_s=8.0,
+                    connect=lambda: rr.client(session_id="bridge-lab"),
+                    out=out,
+                )
+            finally:
+                releaser.cancel()
+                releaser.join(timeout=2.0)
+        finally:
+            claude_adapter.close()
+            claude_host.close()
+            codex_adapter.close()
+            codex_server.close()
+
+    assert rc == 0, out.text
+    summary = _summary(run_dir, "G")
+    assert summary["session"] == "claude-1"
+    assert summary["family"] == "claude"
+
+
+def test_run_g_refuses_when_both_families_are_explicit(paths, run_dir):
+    out = Out()
+    with RunningRouter(paths) as rr:
+        rc = lab_run(
+            "G",
+            run_dir=run_dir,
+            claude_id="claude-1",
+            codex_id="codex-1",
+            timeout_s=1.0,
+            connect=lambda: rr.client(session_id="bridge-lab"),
+            out=out,
+        )
+
+    assert rc == 2
+    assert "Experiment G targets one family per run; pass only --claude or only --codex" in (
+        out.text
+    )
+
+
+def test_run_g_auto_picks_codex_and_announces_it_when_neither_is_explicit(paths, run_dir):
+    out = Out()
+    with RunningRouter(paths) as rr:
+        adapter, server = _make_codex(rr, "codex-1")
+        try:
+            ctrl = rr.client(session_id="ctrl")
+            assert _wait_reachable(ctrl, "codex-1", state="idle")
+
+            server.emit_status("working")
+            deadline = time.time() + 3.0
+            while time.time() < deadline:
+                entry = next(s for s in ctrl.call("roster", {})["sessions"] if s["id"] == "codex-1")
+                if entry["state"] == "working":
+                    break
+                time.sleep(0.02)
+
+            releaser = threading.Timer(0.4, lambda: server.emit_status("idle"))
+            releaser.start()
+            try:
+                rc = lab_run(
+                    "G",
+                    run_dir=run_dir,
+                    timeout_s=8.0,
+                    connect=lambda: rr.client(session_id="bridge-lab"),
+                    out=out,
+                )
+            finally:
+                releaser.cancel()
+                releaser.join(timeout=2.0)
+        finally:
+            adapter.close()
+            server.close()
+
+    assert rc == 0, out.text
+    summary = _summary(run_dir, "G")
+    assert summary["session"] == "codex-1"
+    assert summary["family"] == "codex"
+    assert (
+        "G target: codex codex-1 (auto-picked; pass --claude or --codex to choose)" in out.text
+    )
+
+
 # ---------------------------------------------------------------------------
 # run H
 # ---------------------------------------------------------------------------
@@ -487,7 +597,7 @@ def test_run_h_records_reachability_transitions_with_a_scripted_prompter(paths, 
     prompts: list[str] = []
 
     with RunningRouter(paths) as rr:
-        adapter, host = _make_claude(rr, "claude-1")
+        adapter, host = _make_claude(rr, paths, "claude-1")
         live["adapter"], live["host"] = adapter, host
         ctrl = rr.client(session_id="ctrl")
         assert _wait_reachable(ctrl, "claude-1")
@@ -500,7 +610,7 @@ def test_run_h_records_reachability_transitions_with_a_scripted_prompter(paths, 
                 live["adapter"].close()
                 live["host"].close()
             elif step == 1:  # restart it under the same Bridge session id
-                live["adapter"], live["host"] = _make_claude(rr, "claude-1")
+                live["adapter"], live["host"] = _make_claude(rr, paths, "claude-1")
             elif step == 2:  # stop the router
                 rr.server.stop()
                 time.sleep(0.3)

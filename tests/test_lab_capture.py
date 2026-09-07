@@ -40,6 +40,24 @@ def test_redaction_replaces_only_body_fields():
     assert params["message"] == "<redacted:2 chars>"
 
 
+def test_channel_notification_content_is_redacted_unless_full(tmp_path):
+    frame = {
+        "jsonrpc": "2.0",
+        "method": "notifications/claude/channel",
+        "params": {
+            "content": "[bridge call]\nquestion: why?",
+            "meta": {"kind": "call", "call_id": "c-1", "from": "codex-1 (refactor)"},
+        },
+    }
+    path = tmp_path / "wire.jsonl"
+    capture.CaptureWriter(path).on_frame("adapter", "out", frame)
+    capture.CaptureWriter(path, full=True).on_frame("adapter", "out", frame)
+    records = capture.read_capture(path)
+    assert capture.frame_params(records[0])["content"] == "<redacted:28 chars>"
+    assert capture.frame_params(records[0])["meta"] == frame["params"]["meta"]
+    assert capture.frame_params(records[1])["content"] == frame["params"]["content"]
+
+
 def test_redaction_recurses_into_lists():
     frame = {"params": {"input": [{"type": "text", "text": "abcde"}]}}
     assert capture.redact(frame)["params"]["input"][0]["text"] == "<redacted:5 chars>"

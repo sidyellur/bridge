@@ -113,15 +113,15 @@ def describe_channel_mode(channel_args: Sequence[str]) -> str:
     ``bridge claude`` launch."""
     if not channel_args:
         return "Claude Channel mode: unsupported; this session is inbound-unreachable"
-    from .claude_probe import DEV_ARG_MARKER, PLUGIN_ARG_MARKER
+    from .claude_probe import DEV_CHANNEL_SPEC, DEV_CHANNELS_FLAG, PLUGIN_ARG_MARKER
 
     joined = " ".join(channel_args)
     if PLUGIN_ARG_MARKER in joined:
         return "Claude Channel mode: plugin"
-    if DEV_ARG_MARKER in joined:
+    if DEV_CHANNELS_FLAG in channel_args:
         return (
-            "Claude Channel mode: development (research preview; organization "
-            "policy may block inbound delivery)"
+            f"Claude Channel mode: development (research preview: {DEV_CHANNELS_FLAG} "
+            f"{DEV_CHANNEL_SPEC}; organization policy may block inbound delivery)"
         )
     return "Claude Channel mode: custom"
 
@@ -219,6 +219,10 @@ def run_wrapper(
         binary = resolve_binary("claude", base_env)
         channel_args = load_claude_channel_args(paths)
         argv = build_claude_argv(binary, session_id, user_args, channel_args, is_resume=is_resume)
+        # A session that never completes the channel handshake writes nothing of its
+        # own, so leave this stub for `bridge doctor` to find missing a handshake.
+        # Dropping any previous run's handshake keeps a resume honest.
+        paths.merge_session_meta(session_id, {"family": "claude"}, drop=("handshake",))
     elif family == "codex":
         return _run_codex_wrapper(
             user_args,

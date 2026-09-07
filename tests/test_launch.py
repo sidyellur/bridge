@@ -55,8 +55,17 @@ def test_resolve_claude_session_id_explicit():
 
 
 def test_build_claude_argv_adds_session_id_when_absent():
-    argv = build_claude_argv("claude", "sid", ["--foo"], ["--channels", "bridge"])
-    assert argv == ["claude", "--session-id", "sid", "--channels", "bridge", "--foo"]
+    argv = build_claude_argv(
+        "claude", "sid", ["--foo"], ["--dangerously-load-development-channels", "server:bridge"]
+    )
+    assert argv == [
+        "claude",
+        "--session-id",
+        "sid",
+        "--dangerously-load-development-channels",
+        "server:bridge",
+        "--foo",
+    ]
 
 
 def test_build_claude_argv_preserves_explicit_session_id():
@@ -99,9 +108,12 @@ def test_describe_channel_mode_unsupported_when_no_args():
 
 
 def test_describe_channel_mode_development():
-    line = describe_channel_mode(["--channels", "dev:bridge"])
-    assert "development" in line.lower()
-    assert "research preview" in line.lower()
+    line = describe_channel_mode(["--dangerously-load-development-channels", "server:bridge"])
+    assert line == (
+        "Claude Channel mode: development (research preview: "
+        "--dangerously-load-development-channels server:bridge; organization "
+        "policy may block inbound delivery)"
+    )
 
 
 def test_describe_channel_mode_plugin():
@@ -176,11 +188,66 @@ def test_run_wrapper_passes_identity_and_exit_code(paths, tmp_path, ids):
 # plain single-mode capture exe used above.
 
 
+def test_run_wrapper_claude_writes_a_session_meta_stub(paths, tmp_path, ids):
+    """doctor's handshake row can only warn about a session it knows exists."""
+    capture = tmp_path / "cap.jsonl"
+    bindir = tmp_path / "bin"
+    make_capture_exe(bindir, "claude", capture)
+
+    with RunningRouter(paths) as rr:
+        env = {"PATH": f"{bindir}", "BRIDGE_CLAUDE_BIN": str(bindir / "claude")}
+        result = run_wrapper(
+            "claude",
+            [],
+            paths=paths,
+            env=env,
+            new_id=ids.new,
+            ensure_running=lambda p: None,
+            connect=lambda paths, session_id, role: rr.client(session_id=session_id, role=role),
+            forward_signals=False,
+            print_address=False,
+        )
+
+    meta = json.loads(paths.session_meta(result.session_id).read_text())
+    assert meta == {"family": "claude"}
+
+
+def test_run_wrapper_claude_clears_a_stale_handshake(paths, tmp_path, ids):
+    """A resumed session must re-prove the handshake: the previous run's record
+    would otherwise make doctor report a channel that no longer loads as OK."""
+    capture = tmp_path / "cap.jsonl"
+    bindir = tmp_path / "bin"
+    make_capture_exe(bindir, "claude", capture)
+    paths.merge_session_meta(
+        "resumed-1",
+        {"family": "claude", "handshake": {"client_info": {"name": "claude-code"}}},
+    )
+
+    with RunningRouter(paths) as rr:
+        env = {"PATH": f"{bindir}", "BRIDGE_CLAUDE_BIN": str(bindir / "claude")}
+        run_wrapper(
+            "claude",
+            ["--resume", "resumed-1"],
+            paths=paths,
+            env=env,
+            new_id=ids.new,
+            ensure_running=lambda p: None,
+            connect=lambda paths, session_id, role: rr.client(session_id=session_id, role=role),
+            forward_signals=False,
+            print_address=False,
+        )
+
+    meta = json.loads(paths.session_meta("resumed-1").read_text())
+    assert meta == {"family": "claude"}
+
+
 def test_run_wrapper_claude_prints_channel_mode_line(paths, tmp_path, ids, capsys):
     capture = tmp_path / "cap.jsonl"
     bindir = tmp_path / "bin"
     make_capture_exe(bindir, "claude", capture)
-    (paths.home / "claude_channel_args.json").write_text(json.dumps(["--channels", "dev:bridge"]))
+    (paths.home / "claude_channel_args.json").write_text(
+        json.dumps(["--dangerously-load-development-channels", "server:bridge"])
+    )
 
     with RunningRouter(paths) as rr:
         env = {"PATH": f"{bindir}", "BRIDGE_CLAUDE_BIN": str(bindir / "claude")}
@@ -228,7 +295,9 @@ def test_run_wrapper_no_channel_line_when_print_address_false(paths, tmp_path, i
     capture = tmp_path / "cap.jsonl"
     bindir = tmp_path / "bin"
     make_capture_exe(bindir, "claude", capture)
-    (paths.home / "claude_channel_args.json").write_text(json.dumps(["--channels", "dev:bridge"]))
+    (paths.home / "claude_channel_args.json").write_text(
+        json.dumps(["--dangerously-load-development-channels", "server:bridge"])
+    )
 
     with RunningRouter(paths) as rr:
         env = {"PATH": f"{bindir}", "BRIDGE_CLAUDE_BIN": str(bindir / "claude")}
