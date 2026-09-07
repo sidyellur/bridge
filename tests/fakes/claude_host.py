@@ -10,11 +10,8 @@ from bridge.mcp import RpcEndpoint
 
 
 class FakeClaudeHost:
-    def __init__(
-        self, sock, *, supports_channel: bool = True, auto_reply: str | None = None
-    ) -> None:
+    def __init__(self, sock, *, auto_reply: str | None = None) -> None:
         self.rpc = RpcEndpoint(sock, name="fake-claude-host")
-        self.supports_channel = supports_channel
         self.auto_reply = auto_reply
         self.channel_events: list[dict] = []
         self._cv = threading.Condition()
@@ -22,12 +19,11 @@ class FakeClaudeHost:
         self.rpc.start()
 
     def initialize(self) -> dict:
-        caps = {"claude/channel": {}} if self.supports_channel else {}
         return self.rpc.request(
             "initialize",
             {
                 "protocolVersion": "2024-11-05",
-                "capabilities": caps,
+                "capabilities": {},
                 "clientInfo": {"name": "fake-claude", "version": "0"},
             },
         )
@@ -45,12 +41,13 @@ class FakeClaudeHost:
         with self._cv:
             self.channel_events.append(params)
             self._cv.notify_all()
-        if self.auto_reply is not None and params.get("kind") == "call":
+        meta = params.get("meta") or {}
+        if self.auto_reply is not None and meta.get("kind") == "call":
             # Reply off the reader thread: call_tool waits for a response that this
             # same thread must read, so a synchronous reply here would deadlock.
             threading.Thread(
                 target=self.call_tool,
-                args=("reply", {"call_id": params["call_id"], "answer": self.auto_reply}),
+                args=("reply", {"call_id": meta["call_id"], "answer": self.auto_reply}),
                 daemon=True,
             ).start()
 

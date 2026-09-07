@@ -245,28 +245,46 @@ def test_channel_mode_fails_when_unsupported(paths, fake_user_home):
     assert not report.ok
 
 
-def test_policy_check_ok_when_no_sessions(paths, fake_user_home):
+def test_handshake_check_ok_when_no_sessions(paths, fake_user_home):
     _install(paths, fake_user_home)
     report = _doctor(paths, fake_user_home)
-    assert _status(report, "Claude channel policy") == OK
+    assert _status(report, "Claude channel handshake") == OK
+    assert _detail(report, "Claude channel handshake") == "no managed sessions recorded"
 
 
-def test_policy_error_surfaced_from_session_meta(paths, fake_user_home):
+def test_handshake_check_ok_when_every_claude_session_initialized(paths, fake_user_home):
     _install(paths, fake_user_home)
     paths.ensure_session_dir("claude-1")
     paths.session_meta("claude-1").write_text(
         json.dumps(
             {
-                "policy_error": "organization policy blocks the claude/channel capability",
-                "channel_enabled": False,
+                "family": "claude",
+                "handshake": {
+                    "client_info": {"name": "claude-code", "version": "2.1.234"},
+                    "client_capabilities": {},
+                },
             }
         )
     )
+    paths.ensure_session_dir("codex-1")
+    paths.session_meta("codex-1").write_text(json.dumps({"family": "codex"}))
     report = _doctor(paths, fake_user_home)
-    assert _status(report, "Claude channel policy") == WARN
-    detail = next(c.detail for c in report.checks if c.name == "Claude channel policy")
-    assert "organization policy" in detail
-    assert "claude-1" in detail
+    assert _status(report, "Claude channel handshake") == OK
+    assert _detail(report, "Claude channel handshake") == (
+        "1 session(s) completed initialize (claude-code 2.1.234)"
+    )
+
+
+def test_handshake_check_warns_when_a_session_never_initialized(paths, fake_user_home):
+    _install(paths, fake_user_home)
+    paths.ensure_session_dir("claude-1")
+    paths.session_meta("claude-1").write_text(json.dumps({"family": "claude"}))
+    report = _doctor(paths, fake_user_home)
+    assert _status(report, "Claude channel handshake") == WARN
+    detail = _detail(report, "Claude channel handshake")
+    assert "session claude-1 has no recorded initialize handshake" in detail
+    assert "startup channels notice" in detail
+    assert report.ok  # WARN alone does not fail the overall report
 
 
 def test_bad_token_permissions_fail(paths, fake_user_home):

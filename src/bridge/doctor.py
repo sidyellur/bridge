@@ -117,7 +117,7 @@ def doctor(
 
     # Channel mode: detect real support instead of assuming a hard-coded mode.
     report.add(*_channel_mode_check(probe))
-    report.add(*_policy_check(paths))
+    report.add(*_handshake_check(paths))
 
     # Vendor binaries / remote flags.
     if check_binaries:
@@ -260,25 +260,43 @@ def _channel_mode_check(probe: Callable[[], ChannelMode] | None) -> tuple[str, s
     )
 
 
-def _policy_check(paths: Paths) -> tuple[str, str, str]:
-    """Surface any persisted ``policy_error`` from known sessions' session.json
-    (written by the Claude Channel adapter when Claude does not negotiate the
-    channel capability). Token-free: reads only what is already on disk."""
+def _handshake_check(paths: Paths) -> tuple[str, str, str]:
+    """Report which Claude sessions recorded an initialize handshake in their
+    session.json. Claude Code drops the events of a channel it never loaded
+    without telling the server, so a missing handshake is the only local signal
+    that Bridge was not registered. Token-free: reads only what is on disk."""
+    name = "Claude channel handshake"
     sessions_dir = paths.sessions_dir
     if not sessions_dir.exists():
-        return ("Claude channel policy", OK, "no managed sessions recorded")
-    errors = []
+        return (name, OK, "no managed sessions recorded")
+    clients: list[str] = []
+    missing: list[str] = []
     for meta_path in sorted(sessions_dir.glob("*/session.json")):
         try:
             data = json.loads(meta_path.read_text())
         except (OSError, json.JSONDecodeError):
             continue
-        err = data.get("policy_error")
-        if err:
-            errors.append(f"{meta_path.parent.name}: {err}")
-    if errors:
-        return ("Claude channel policy", WARN, "; ".join(errors))
-    return ("Claude channel policy", OK, "no policy errors recorded")
+        if not isinstance(data, dict):
+            continue
+        family = data.get("family")
+        if family is not None and family != "claude":
+            continue
+        handshake = data.get("handshake")
+        if isinstance(handshake, dict):
+            info = handshake.get("client_info")
+            info = info if isinstance(info, dict) else {}
+            clients.append(f"{info.get('name') or 'unknown'} {info.get('version') or 'unknown'}")
+        else:
+            missing.append(
+                f"session {meta_path.parent.name} has no recorded initialize handshake; "
+                "Claude may not have loaded the Bridge server (check the startup "
+                "channels notice)"
+            )
+    if missing:
+        return (name, WARN, "; ".join(missing))
+    if not clients:
+        return (name, OK, "no managed sessions recorded")
+    return (name, OK, f"{len(clients)} session(s) completed initialize ({', '.join(clients)})")
 
 
 def _has_guidance(path: Path) -> bool:

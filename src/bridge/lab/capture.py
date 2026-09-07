@@ -29,7 +29,7 @@ CAPTURE_FILENAME = "wire.jsonl"
 
 #: Body-bearing keys. Their string values never reach a capture file unless the
 #: operator explicitly asked for ``--full``.
-REDACTED_KEYS = ("text", "message", "question", "answer")
+REDACTED_KEYS = ("text", "message", "question", "answer", "content")
 
 #: ``on_frame(source, direction, obj)``. ``direction`` is ``"in"`` or ``"out"``
 #: from the perspective of the component that owns the hook.

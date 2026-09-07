@@ -490,6 +490,12 @@ def _require_session(ctx: LabContext, session_id: str | None, family: str) -> st
     return session_id
 
 
+def _channel_meta(record: Mapping[str, Any]) -> dict[str, Any]:
+    """A channel notification carries its routing fields in ``params.meta``."""
+    meta = frame_params(record).get("meta")
+    return meta if isinstance(meta, dict) else {}
+
+
 def _run_e(ctx: LabContext) -> tuple[int, dict[str, Any]]:
     target = _require_session(ctx, ctx.claude_id, "claude")
     ctx.tail.mark()
@@ -512,9 +518,9 @@ def _run_e(ctx: LabContext) -> tuple[int, dict[str, Any]]:
     notifications = [
         r
         for r in ctx.records
-        if frame_method(r) == CHANNEL_NOTIFICATION and frame_params(r).get("kind") == "call"
+        if frame_method(r) == CHANNEL_NOTIFICATION and _channel_meta(r).get("kind") == "call"
     ]
-    matched = [n for n in notifications if frame_params(n).get("call_id") == call_id]
+    matched = [n for n in notifications if _channel_meta(n).get("call_id") == call_id]
     replied = result.get("status") == "answered"
 
     ctx.out(f"observed: channel notifications for this call: {len(matched)}")

@@ -70,9 +70,13 @@ finds, instead of assuming a fixed mode:
 
 `bridge claude` prints the detected mode to stderr once at startup, right
 after the session address. Re-run `bridge install` after upgrading `claude` to
-re-detect and pick up a better mode. `bridge doctor` also surfaces any
-organization-policy rejection a session recorded when it tried to negotiate
-the channel capability, under **Claude channel policy**.
+re-detect and pick up a better mode. Claude Code never tells a server that it
+declined to load it as a channel — unregistered channels drop events silently —
+so **Claude channel handshake** in `bridge doctor` reports which sessions
+completed the MCP initialize handshake with Bridge. If a session is missing
+there, or events never arrive despite a recorded handshake, check the channels
+notice `claude` prints at startup: it names the channels it loaded and is the
+only place an allowlist or organization-policy rejection is visible.
 
 ## Launch flow
 
@@ -234,8 +238,8 @@ service.
 
 Run `bridge doctor`. It checks socket/token ownership and permissions, MCP
 registration on both families, the coordination guidance, the detected Claude
-Channel mode (see [Channel modes](#channel-modes) above) and any persisted
-organization-policy rejection, vendor binaries, absence of obsolete artifacts,
+Channel mode (see [Channel modes](#channel-modes) above) and the recorded
+channel handshakes, vendor binaries, absence of obsolete artifacts,
 and runs a token-free local loopback protocol probe (it never spends model
 tokens).
 
