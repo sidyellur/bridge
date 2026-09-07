@@ -250,15 +250,15 @@ def test_notify_omit_empty_params_sends_no_params_key():
 
 def test_on_parse_error_receives_the_raw_payload_and_default_is_silent():
     client, peer = socket.socketpair()
+    errors = []
+    endpoint = RpcEndpoint(
+        client, name="a", on_parse_error=lambda payload: errors.append(payload)
+    ).start()
     try:
-        errors = []
-        endpoint = RpcEndpoint(
-            client, name="a", on_parse_error=lambda payload: errors.append(payload)
-        ).start()
-        peer.sendall(b"not json\n")
-        peer.sendall(b'{"method":"ping","params":{}}\n')
         received = []
         endpoint.notification("ping", lambda params: received.append(params))
+        peer.sendall(b"not json\n")
+        peer.sendall(b'{"method":"ping","params":{}}\n')
         for _ in range(200):
             if received:
                 break
@@ -270,12 +270,12 @@ def test_on_parse_error_receives_the_raw_payload_and_default_is_silent():
         peer.close()
 
     client2, peer2 = socket.socketpair()
+    default_endpoint = RpcEndpoint(client2, name="b").start()
     try:
-        default_endpoint = RpcEndpoint(client2, name="b").start()
-        peer2.sendall(b"not json\n")
-        peer2.sendall(b'{"method":"ping","params":{}}\n')
         received2 = []
         default_endpoint.notification("ping", lambda params: received2.append(params))
+        peer2.sendall(b"not json\n")
+        peer2.sendall(b'{"method":"ping","params":{}}\n')
         for _ in range(200):
             if received2:
                 break
@@ -323,4 +323,90 @@ def test_ws_peer_close_fails_pending_requests_and_calls_on_close():
             threading.Event().wait(0.01)
         assert close_calls == [1]
     finally:
+        server.close()
+
+
+def test_ws_server_handshake_failure_fails_pending_and_calls_on_close():
+    client_sock, server_sock = socket.socketpair()
+    close_calls = []
+    server = RpcEndpoint(
+        server_sock,
+        name="server",
+        framing=Framing.WS_SERVER,
+        on_close=lambda: close_calls.append(1),
+    )
+    hook_calls = []
+    original_hook = threading.excepthook
+    threading.excepthook = hook_calls.append
+    try:
+        server.start()
+
+        errors = {}
+
+        def run():
+            try:
+                server.request("m", timeout=5.0)
+            except JsonRpcError as exc:
+                errors["exc"] = exc
+
+        thread = threading.Thread(target=run)
+        thread.start()
+        # Peer disappears without ever sending the WS handshake -> server_handshake
+        # hits EOF and raises WebSocketError("missing Sec-WebSocket-Key").
+        client_sock.close()
+        thread.join(timeout=5)
+
+        assert errors["exc"].code == -32603
+        assert errors["exc"].message == "connection closed"
+        for _ in range(200):
+            if close_calls:
+                break
+            threading.Event().wait(0.01)
+        assert close_calls == [1]
+        assert hook_calls == []
+    finally:
+        threading.excepthook = original_hook
+        server.close()
+
+
+def test_ws_protocol_violation_tears_down_the_endpoint():
+    client_sock, server_sock = socket.socketpair()
+    close_calls = []
+    server = RpcEndpoint(
+        server_sock,
+        name="server",
+        framing=Framing.WS_SERVER,
+        on_close=lambda: close_calls.append(1),
+    )
+    try:
+        server.start()
+
+        from bridge import ws
+
+        ws.client_handshake(client_sock)
+
+        errors = {}
+
+        def run():
+            try:
+                server.request("m", timeout=5.0)
+            except JsonRpcError as exc:
+                errors["exc"] = exc
+
+        thread = threading.Thread(target=run)
+        thread.start()
+        # An unmasked client->server frame is a protocol violation; recv_message
+        # raises WebSocketError, which must tear the endpoint down like an OSError.
+        ws.send_frame(client_sock, ws.OP_TEXT, b"hello", mask=False)
+        thread.join(timeout=5)
+
+        assert errors["exc"].code == -32603
+        assert errors["exc"].message == "connection closed"
+        for _ in range(200):
+            if close_calls:
+                break
+            threading.Event().wait(0.01)
+        assert close_calls == [1]
+    finally:
+        client_sock.close()
         server.close()

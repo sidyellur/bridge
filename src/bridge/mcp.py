@@ -167,13 +167,15 @@ class RpcEndpoint:
             from . import ws
 
             exc_types = (OSError, ws.WebSocketError)
+        unexpected = False
+        try:
             if self._framing is Framing.WS_SERVER:
                 # Runs here, not in start(), so a server endpoint can be
                 # constructed and start()ed before its peer connects, instead of
-                # blocking the caller's constructor on the handshake.
+                # blocking the caller's constructor on the handshake; inside the
+                # try so a handshake failure gets the same teardown as any other
+                # protocol violation, instead of an unhandled traceback.
                 ws.server_handshake(self._sock)
-        unexpected = False
-        try:
             if self._framing is Framing.JSONL:
                 while not self._closed:
                     chunk = self._sock.recv(65536)
