@@ -37,7 +37,12 @@ from pathlib import Path
 from typing import Any
 
 from .. import __version__
-from ..codex_app_server import FORBIDDEN_METHODS
+from ..codex_app_server import (
+    FORBIDDEN_METHODS,
+    N_ITEM_COMPLETED,
+    N_ITEM_DELTA,
+    N_ITEM_STARTED,
+)
 from ..paths import Paths
 from .capture import (
     CAPTURE_ENV,
@@ -428,12 +433,18 @@ def _turn_id(container: Mapping[str, Any]) -> Any:
     return turn.get("id") if isinstance(turn, Mapping) else None
 
 
+_ITEM_NOTIFICATION_METHODS = (N_ITEM_STARTED, N_ITEM_DELTA, N_ITEM_COMPLETED)
+
+
 def correlate_turns(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     """Pair ``turn/start`` requests with their ``turn/started`` /
-    ``turn/completed`` notifications through the returned ``turn_id``."""
+    ``turn/completed`` notifications through the returned ``turn_id``, and
+    separately collect the turn ids seen on ``item/*`` notifications."""
     request_ids: set[Any] = set()
     started: set[str] = set()
     completed: set[str] = set()
+    items: list[str] = []
+    seen_items: set[str] = set()
     for rec in records:
         method = frame_method(rec)
         frame = rec.get("frame")
@@ -449,6 +460,11 @@ def correlate_turns(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             turn_id = _turn_id(frame_params(rec))
             if isinstance(turn_id, str):
                 completed.add(turn_id)
+        elif method in _ITEM_NOTIFICATION_METHODS:
+            turn_id = frame_params(rec).get("turnId")
+            if isinstance(turn_id, str) and turn_id and turn_id not in seen_items:
+                seen_items.add(turn_id)
+                items.append(turn_id)
 
     turn_ids: list[str] = []
     for rec in records:
@@ -468,6 +484,7 @@ def correlate_turns(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         "turn_ids": turn_ids,
         "started": sorted(started),
         "completed": sorted(completed),
+        "items": items,
         "correlated": [t for t in turn_ids if t in started and t in completed],
     }
 
@@ -575,6 +592,7 @@ def _run_f(ctx: LabContext) -> tuple[int, dict[str, Any]]:
     ctx.out(f"observed: turn/started: {correlation['started'] or '(none)'}")
     ctx.out(f"observed: turn/completed: {correlation['completed'] or '(none)'}")
     ctx.out(f"observed: correlated start->completed: {correlation['correlated'] or '(none)'}")
+    ctx.out(f"observed: item notifications for turn ids: {correlation['items'] or '(none)'}")
     if not ctx.tail.exists():
         ctx.out(f"warning: no capture file; is {CAPTURE_ENV} exported in the session's terminal?")
 
@@ -638,7 +656,10 @@ def _run_g(ctx: LabContext) -> tuple[int, dict[str, Any]]:
 
     steer = _steer_frames(ctx)
     if steer:
-        ctx.out(f"FAIL: {len(steer)} turn/steer frame(s) in the capture - v1 must never steer")
+        ctx.out(
+            f"FAIL: {len(steer)} forbidden frame(s) in the capture - "
+            "Bridge must never steer or interrupt"
+        )
     else:
         ctx.out("observed: no turn/steer frame in the capture")
 

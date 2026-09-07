@@ -13,9 +13,10 @@ Plan: `docs/superpowers/plans/2026-08-26-bridge-v1-plan.md` Task 1
 > installed versions, and output here.
 >
 > The adapters in `src/bridge/` are written against the documented contracts
-> (`tests/fixtures/codex_protocol/v1.json` pins the Codex side) and are covered
-> by hermetic contract tests. These experiments validate that those contracts
-> match the real vendors before the `-m live` suites are trusted.
+> (`tests/fixtures/codex_protocol/codex-0.151.0.json` pins the Codex side) and
+> are covered by hermetic contract tests. These experiments validate that
+> those contracts match the real vendors before the `-m live` suites are
+> trusted.
 
 ## How to run
 
@@ -84,8 +85,8 @@ Capture notes:
 * Each `bridge lab run X` writes the frames it observed plus a summary record to
   `<run>/X.jsonl`. Cite that path in the verdict.
 
-`bridge lab` never issues `turn/steer`, never resumes a session, and never
-writes a verdict of its own.
+`bridge lab` never issues `turn/steer`, `turn/interrupt`, or `review/start`,
+never resumes a session, and never writes a verdict of its own.
 
 ---
 

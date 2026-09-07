@@ -172,9 +172,11 @@ def _make_claude(rr, paths, session_id, *, auto_reply=None):
     return adapter, host
 
 
-def _make_codex(rr, session_id, *, auto_complete=True):
+def _make_codex(rr, session_id, *, auto_complete=True, resume_result="ok"):
     client_sock, server_sock = socket.socketpair()
-    server = FakeCodexAppServer(server_sock, cwd=CODEX_CWD, auto_complete=auto_complete)
+    server = FakeCodexAppServer(
+        server_sock, cwd=CODEX_CWD, auto_complete=auto_complete, resume_result=resume_result
+    )
     app = CodexAppServerClient(client_sock, cwd=CODEX_CWD).start()
     adapter = CodexAdapter(session_id, app)
     adapter.connect_router(
@@ -395,6 +397,7 @@ def test_run_f_correlates_turn_started_to_turn_completed(paths, run_dir):
     assert summary["correlated"], summary
     assert summary["correlated"][0] in summary["started"]
     assert summary["correlated"][0] in summary["completed"]
+    assert summary["correlated"][0] in summary["items"]
     assert summary["turn_start_requests"] >= 1
 
 
@@ -422,20 +425,93 @@ def test_run_f_fails_when_the_turn_never_completes(paths, run_dir):
     assert summary["started"]  # the turn did start
     assert summary["completed"] == []  # it never completed
     assert summary["correlated"] == []
+    assert summary["items"]  # the user-message item still landed
 
 
-def test_correlate_turns_pairs_ids_through_the_response():
+def test_run_f_reports_no_correlation_when_the_subscription_was_refused(paths, run_dir):
+    out = Out()
+    with RunningRouter(paths) as rr:
+        adapter, server = _make_codex(rr, "codex-1", resume_result="unsupported")
+        try:
+            ctrl = rr.client(session_id="ctrl")
+            assert _wait_reachable(ctrl, "codex-1", state="idle")
+            rc = lab_run(
+                "F",
+                run_dir=run_dir,
+                codex_id="codex-1",
+                timeout_s=0.5,
+                connect=lambda: rr.client(session_id="bridge-lab"),
+                out=out,
+            )
+        finally:
+            adapter.close()
+            server.close()
+
+    assert rc == 1
+    summary = _summary(run_dir, "F")
+    # 0.151.0 refuses `thread/resume` for the live TUI thread: no turn/*
+    # or item/* notification ever reaches Bridge, but the turn is still
+    # admitted -- this is the honest 0.151.0 verdict, not a Bridge bug.
+    assert summary["started"] == []
+    assert summary["items"] == []
+    assert summary["correlated"] == []
+    assert summary["admission_status"] in ("queued", "delivered")
+
+
+def test_correlate_turns_pairs_ids_through_the_result_turn_object():
     records = [
         {"frame": {"id": 7, "method": "turn/start", "params": {}}},
-        {"frame": {"id": 7, "result": {"turn": {"id": "turn-1"}}}},
-        {"frame": {"method": "turn/started", "params": {"turn": {"id": "turn-1"}}}},
-        {"frame": {"method": "turn/completed", "params": {"turn": {"id": "turn-1"}}}},
+        {
+            "frame": {
+                "id": 7,
+                "result": {"turn": {"id": "01a07a20", "status": "inProgress", "items": []}},
+            }
+        },
+        {"frame": {"method": "turn/started", "params": {"turn": {"id": "01a07a20"}}}},
+        {"frame": {"method": "turn/completed", "params": {"turn": {"id": "01a07a20"}}}},
         {"frame": {"method": "turn/started", "params": {"turn": {"id": "other"}}}},
     ]
     result = correlate_turns(records)
-    assert result["turn_ids"] == ["turn-1"]
-    assert result["correlated"] == ["turn-1"]
+    assert result["turn_ids"] == ["01a07a20"]
+    assert result["correlated"] == ["01a07a20"]
     assert "other" in result["started"]
+
+
+def test_correlate_turns_collects_item_turn_ids():
+    records = [
+        {
+            "frame": {
+                "method": "item/started",
+                "params": {"threadId": "t1", "turnId": "01a07a20", "item": {}},
+            }
+        },
+        {
+            "frame": {
+                "method": "item/agentMessage/delta",
+                "params": {"threadId": "t1", "turnId": "01a07a20", "delta": "hi"},
+            }
+        },
+        {
+            "frame": {
+                "method": "item/completed",
+                "params": {"threadId": "t1", "turnId": "01a07a20", "item": {}},
+            }
+        },
+    ]
+    result = correlate_turns(records)
+    assert result["items"] == ["01a07a20"]
+
+
+def test_correlate_turns_ignores_legacy_turn_id_frames():
+    records = [
+        {"frame": {"method": "turn/started", "params": {"turn_id": "legacy"}}},
+        {"frame": {"method": "turn/completed", "params": {"turn_id": "legacy"}}},
+    ]
+    result = correlate_turns(records)
+    assert result["started"] == []
+    assert result["completed"] == []
+    assert result["correlated"] == []
+    assert result["items"] == []
 
 
 # ---------------------------------------------------------------------------
@@ -519,7 +595,7 @@ def test_run_g_hard_fails_on_any_turn_steer_frame(paths, run_dir):
             server.close()
 
     assert rc == 1
-    assert "turn/steer" in out.text
+    assert "FAIL: 1 forbidden frame(s) in the capture" in out.text
     assert _summary(run_dir, "G")["steer_frames"] == 1
 
 
@@ -887,7 +963,7 @@ def test_cli_registers_bridge_lab(temp_doc, capsys):
     assert "bridge lab {prepare,run,verdict,report}" in capsys.readouterr().out
 
 
-def test_lab_only_ever_watches_for_the_forbidden_method():
+def test_lab_only_ever_watches_for_the_forbidden_methods():
     from bridge.codex_app_server import FORBIDDEN_METHODS
     from bridge.lab import cli as lab_cli
 
@@ -897,3 +973,34 @@ def test_lab_only_ever_watches_for_the_forbidden_method():
     # client module's tuple, so no method literal appears here at all.
     for method in FORBIDDEN_METHODS:
         assert f'"{method}"' not in source
+
+
+def test_no_legacy_codex_wire_names_remain():
+    repo_root = Path(__file__).resolve().parent.parent
+    legacy_patterns = ('"turn_id"', "runtime/status", "codex-app-server/1", "item/agent_message")
+    # `"thread_id"` is also a name from the invented v1 contract, but Bridge's
+    # own session-meta schema (adapters/codex.py, its tests) legitimately uses
+    # that same spelling for an unrelated, non-wire field -- this plan does not
+    # touch that file, so it is excluded rather than mistaken for a wire name.
+    thread_id_allowlist = {
+        repo_root / "src" / "bridge" / "adapters" / "codex.py",
+        repo_root / "tests" / "test_codex_adapter.py",
+        repo_root / "tests" / "test_codex_launch.py",
+    }
+    # This test necessarily quotes every pattern it looks for (to build the
+    # legacy-shaped sample records above and to name the patterns themselves).
+    self_path = Path(__file__).resolve()
+    offenders: list[str] = []
+    for base in (repo_root / "src", repo_root / "tests"):
+        for path in base.rglob("*"):
+            if path.suffix not in (".py", ".json") or not path.is_file():
+                continue
+            if "docs" in path.relative_to(repo_root).parts or path == self_path:
+                continue
+            text = path.read_text(encoding="utf-8")
+            for pattern in legacy_patterns:
+                if pattern in text:
+                    offenders.append(f"{path}: {pattern}")
+            if '"thread_id"' in text and path not in thread_id_allowlist:
+                offenders.append(f'{path}: "thread_id"')
+    assert offenders == []
