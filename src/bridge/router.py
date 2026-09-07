@@ -638,11 +638,20 @@ class RouterServer:
             sent = conn.sock.send(conn.outbound)
             del conn.outbound[:sent]
         except BlockingIOError:
+            # The kernel send buffer is full right now (macOS AF_UNIX defaults
+            # to an 8 KB SO_SNDBUF); re-arm EVENT_WRITE so the selector wakes
+            # us again once there's room instead of leaving outbound stuck.
+            self.want_write(conn)
             return
         except OSError:
             self._close_conn(conn)
             return
-        if not conn.outbound:
+        if conn.outbound:
+            # Partial send: same 8 KB SO_SNDBUF limit mid-write. Re-arm
+            # EVENT_WRITE so _service flushes the remainder on the next
+            # writable event instead of it sitting in outbound forever.
+            self.want_write(conn)
+        else:
             self._sel.modify(conn.sock, selectors.EVENT_READ, data=conn)
 
     def _handle_frame(self, conn: _Conn, frame: dict[str, Any]) -> None:
