@@ -39,7 +39,7 @@ from bridge.lab.cli import (
 )
 
 from .fakes.claude_host import FakeClaudeHost
-from .fakes.codex_app_server import FakeCodexAppServer
+from .fakes.codex_app_server import LegacyFakeCodexAppServer
 from .fakes.executables import make_capture_exe
 from .fakes.router_peer import RunningRouter
 
@@ -173,7 +173,7 @@ def _make_claude(rr, paths, session_id, *, auto_reply=None):
 
 def _make_codex(rr, session_id, *, auto_complete=True):
     client_sock, server_sock = socket.socketpair()
-    server = FakeCodexAppServer(server_sock, auto_complete=auto_complete)
+    server = LegacyFakeCodexAppServer(server_sock, auto_complete=auto_complete)
     app = CodexAppServerClient(client_sock).start()
     adapter = CodexAdapter(session_id, app)
     adapter.connect_router(

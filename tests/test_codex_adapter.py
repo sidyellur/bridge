@@ -25,7 +25,7 @@ from bridge.codex_app_server import (
     UnsupportedCodexVersion,
 )
 
-from .fakes.codex_app_server import FakeCodexAppServer
+from .fakes.codex_app_server import LegacyFakeCodexAppServer
 from .fakes.router_peer import RunningRouter
 
 FIXTURE = Path(__file__).parent / "fixtures" / "codex_protocol" / "v1.json"
@@ -45,7 +45,7 @@ def codex_factory(paths):
         auto_complete=True,
     ):
         client_sock, server_sock = socket.socketpair()
-        server = FakeCodexAppServer(
+        server = LegacyFakeCodexAppServer(
             server_sock, version=version, agent_message=agent_message, auto_complete=auto_complete
         )
         app = CodexAppServerClient(client_sock).start()
@@ -92,7 +92,7 @@ def test_pinned_contract_matches_fixture():
 
 def test_unsupported_version_raises():
     client_sock, server_sock = socket.socketpair()
-    server = FakeCodexAppServer(server_sock, version="codex-app-server/999")
+    server = LegacyFakeCodexAppServer(server_sock, version="codex-app-server/999")
     app = CodexAppServerClient(client_sock).start()
     try:
         with pytest.raises(UnsupportedCodexVersion):
@@ -212,11 +212,11 @@ def test_reconnect_recovers_after_transient_disconnect(codex_factory):
     rr, make = codex_factory
     adapter, server = make("codex-1")
 
-    spawned: list[FakeCodexAppServer] = []
+    spawned: list[LegacyFakeCodexAppServer] = []
 
     def reconnect():
         client_sock, server_sock = socket.socketpair()
-        fresh = FakeCodexAppServer(server_sock)
+        fresh = LegacyFakeCodexAppServer(server_sock)
         spawned.append(fresh)
         return CodexAppServerClient(client_sock).start()
 

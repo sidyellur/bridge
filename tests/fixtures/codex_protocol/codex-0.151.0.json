@@ -1,0 +1,93 @@
+{
+  "_comment": "Pinned Codex App Server contract Bridge targets. Generated/verified against codex-cli 0.151.0 on 2026-09-07 via `codex app-server generate-json-schema` plus a live WebSocket probe. Regenerate with the procedure in _regenerate below.",
+  "codex_version": "0.151.0",
+  "supported_codex_versions": ["0.151.0"],
+  "min_codex_version": [0, 151, 0],
+  "transport": {
+    "listen_url": "unix://{socket_path}",
+    "framing": "websocket",
+    "upgrade_request_path": "/",
+    "required_upgrade_headers": ["Upgrade", "Connection", "Sec-WebSocket-Key", "Sec-WebSocket-Version"],
+    "subprotocol": null,
+    "client_frames_must_be_masked": true,
+    "opcode": "text",
+    "messages_per_frame": 1,
+    "jsonrpc_field_present": false,
+    "server_echoes_close_frame": false
+  },
+  "client_requests": {
+    "initialize": {
+      "params": ["clientInfo", "capabilities"],
+      "params_required": ["clientInfo"],
+      "result": ["userAgent", "codexHome", "platformFamily", "platformOs"]
+    },
+    "thread/loaded/list": {
+      "params": ["cursor", "limit"],
+      "params_required": [],
+      "result": ["data", "nextCursor"]
+    },
+    "thread/read": {
+      "params": ["threadId", "includeTurns"],
+      "params_required": ["threadId"],
+      "result": ["thread"]
+    },
+    "thread/resume": {
+      "params": ["threadId", "excludeTurns"],
+      "params_required": ["threadId"],
+      "result": ["thread"]
+    },
+    "thread/unsubscribe": {
+      "params": ["threadId"],
+      "params_required": ["threadId"],
+      "result": ["status"]
+    },
+    "turn/start": {
+      "params": ["threadId", "input"],
+      "params_required": ["threadId", "input"],
+      "result": ["turn"]
+    }
+  },
+  "client_notifications": ["initialized"],
+  "server_notifications": {
+    "thread/started": ["thread"],
+    "thread/status/changed": ["threadId", "status"],
+    "turn/started": ["threadId", "turn"],
+    "turn/completed": ["threadId", "turn"],
+    "item/started": ["threadId", "turnId", "item", "startedAtMs"],
+    "item/agentMessage/delta": ["threadId", "turnId", "itemId", "delta"],
+    "item/completed": ["threadId", "turnId", "item", "completedAtMs"]
+  },
+  "notification_envelope_extra_fields": ["emittedAtMs"],
+  "types": {
+    "UserInput.text": { "type": "text", "fields": ["type", "text"] },
+    "Turn": {
+      "required": ["id", "status", "items"],
+      "optional": ["itemsView", "startedAt", "completedAt", "durationMs", "error"]
+    },
+    "TurnStatus": ["completed", "interrupted", "failed", "inProgress"],
+    "ThreadStatus": ["notLoaded", "idle", "systemError", "active"],
+    "ThreadStatus.active_extra_fields": ["activeFlags"],
+    "ThreadActiveFlag": ["waitingOnApproval", "waitingOnUserInput"],
+    "AgentMessageThreadItem": { "type": "agentMessage", "required": ["id", "type", "text"] },
+    "Thread.required_subset": ["id", "status", "cwd", "createdAt", "source", "cliVersion"]
+  },
+  "thread_discovery": {
+    "tui_thread_is_created_eagerly_on_tui_launch": true,
+    "thread_started_is_global_broadcast": true,
+    "thread_loaded_list_is_server_global": true,
+    "subscribe_verb": "thread/resume",
+    "no_subscribe_method_exists": true,
+    "turn_and_item_notifications_are_subscriber_only": true,
+    "thread_status_changed_is_global_broadcast": true
+  },
+  "known_broken_0_151_0": {
+    "thread/resume": "-32601 'list_turns is not supported yet' for historyMode=paginated threads, with or without excludeTurns; also -32600 'no rollout found' for threads with no persisted content",
+    "thread/turns/list": "-32601 'list_turns is not supported yet'",
+    "thread/items/list": "-32601 'thread/items/list is not supported yet'",
+    "thread/read": "-32601 'list_turns is not supported yet' when includeTurns=true"
+  },
+  "forbidden_methods": ["turn/steer", "turn/interrupt", "review/start"],
+  "bridge_state_map": { "idle": "idle", "active": "working", "notLoaded": "idle", "systemError": "idle" },
+  "launch_argv": ["{binary}", "app-server", "--listen", "unix://{socket_path}"],
+  "_regenerate": "codex app-server generate-json-schema --out /tmp/codex-schema-$(codex --version | awk '{print $2}') && python tools/diff_codex_contract.py /tmp/codex-schema-<ver> tests/fixtures/codex_protocol/codex-<ver>.json"
+}
