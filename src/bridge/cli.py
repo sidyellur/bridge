@@ -100,8 +100,21 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    raw = list(sys.argv[1:] if argv is None else argv)
+    # argparse.REMAINDER drops a leading option (`bridge claude --session-id X`
+    # fails with "unrecognized arguments"), so the launch wrappers take
+    # everything after the family verbatim without going through the parser.
+    if raw and raw[0] == "claude":
+        from .launch import cli_launch_claude
+
+        return cli_launch_claude(raw[1:])
+    if raw and raw[0] == "codex":
+        from .launch import cli_launch_codex
+
+        return cli_launch_codex(raw[1:])
+
     parser = build_parser()
-    args = parser.parse_args(list(argv) if argv is not None else None)
+    args = parser.parse_args(raw)
 
     if not args.command:
         parser.print_help()
