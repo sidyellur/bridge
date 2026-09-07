@@ -41,6 +41,7 @@ _FORBIDDEN = ("turn/steer", "turn/interrupt", "review/start")
 _INVALID_REQUEST = -32600
 _METHOD_NOT_FOUND = -32601
 _LIST_TURNS_UNSUPPORTED = "list_turns is not supported yet"
+_NO_ROLLOUT = "no rollout found for thread id {thread_id}"
 
 
 class FakeCodexAppServer:
@@ -94,7 +95,7 @@ class FakeCodexAppServer:
         self.rpc.method(M_THREAD_UNSUBSCRIBE, self._thread_unsubscribe)
         self.rpc.method(M_TURN_START, self._turn_start)
         for method in _FORBIDDEN:
-            self.rpc.method(method, self._forbidden)
+            self.rpc.method(method, lambda params, m=method: self._forbidden(m, params))
         self.rpc.start()
 
     # --- outbound -----------------------------------------------------------
@@ -163,7 +164,9 @@ class FakeCodexAppServer:
             for thread in self.threads:
                 if thread["id"] == thread_id:
                     return thread
-        raise JsonRpcError(_INVALID_REQUEST, f"no rollout found for thread id {thread_id}")
+        # Unprobed guess: the live server's error for an unknown thread/read id
+        # was never recorded, so this reuses thread/resume's message.
+        raise JsonRpcError(_INVALID_REQUEST, _NO_ROLLOUT.format(thread_id=thread_id))
 
     def _thread_loaded_list(self, _params: dict) -> dict:
         self._require_initialized()
@@ -185,7 +188,7 @@ class FakeCodexAppServer:
         if self.resume_result == "unsupported":
             raise JsonRpcError(_METHOD_NOT_FOUND, _LIST_TURNS_UNSUPPORTED)
         if self.resume_result == "no_rollout":
-            raise JsonRpcError(_INVALID_REQUEST, f"no rollout found for thread id {thread_id}")
+            raise JsonRpcError(_INVALID_REQUEST, _NO_ROLLOUT.format(thread_id=thread_id))
         thread = self._find_thread(thread_id)
         self.subscribed.add(thread_id)
         return {"thread": thread}
@@ -224,22 +227,32 @@ class FakeCodexAppServer:
             N_TURN_STARTED,
             {"threadId": thread_id, "turn": self._turn_obj(turn_id, "inProgress")},
         )
+        user_item = {
+            "type": "userMessage",
+            "id": f"user_{turn_id}",
+            "content": params.get("input", []),
+            "clientId": None,
+        }
         self._notify_subscribed(
             N_ITEM_STARTED,
             {
                 "threadId": thread_id,
                 "turnId": turn_id,
-                "item": {
-                    "type": "userMessage",
-                    "id": f"user_{turn_id}",
-                    "content": params.get("input", []),
-                },
+                "item": user_item,
                 "startedAtMs": self._now_ms(),
+            },
+        )
+        self._notify_subscribed(
+            N_ITEM_COMPLETED,
+            {
+                "threadId": thread_id,
+                "turnId": turn_id,
+                "item": user_item,
+                "completedAtMs": self._now_ms(),
             },
         )
         if self.auto_complete:
             self.complete_turn(turn_id)
-            self.emit_status("idle")
         return {"turn": self._turn_obj(turn_id, "inProgress")}
 
     def complete_turn(
@@ -289,6 +302,7 @@ class FakeCodexAppServer:
                 "completedAtMs": self._now_ms(),
             },
         )
+        self.emit_status("idle")
         self._notify_subscribed(
             N_TURN_COMPLETED,
             {"threadId": self.thread_id, "turn": self._turn_obj(turn_id, status)},
@@ -301,8 +315,8 @@ class FakeCodexAppServer:
         self._notify(N_THREAD_STATUS_CHANGED, {"threadId": self.thread_id, "status": status})
 
     # --- traps --------------------------------------------------------------
-    def _forbidden(self, params: dict) -> dict:
-        self.forbidden_calls.append(params)
+    def _forbidden(self, method: str, params: dict) -> dict:
+        self.forbidden_calls.append({"method": method, "params": params})
         return {}
 
     def _on_parse_error(self, raw: bytes) -> None:

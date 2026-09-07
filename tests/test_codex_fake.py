@@ -338,12 +338,13 @@ def test_turn_and_item_notifications_reach_only_a_subscribed_peer(fake_pair):
         "thread/status/changed",
         "turn/started",
         "item/started",
+        "item/completed",
         "item/started",
         "item/agentMessage/delta",
         "item/agentMessage/delta",
         "item/completed",
-        "turn/completed",
         "thread/status/changed",
+        "turn/completed",
     ]
 
     by_method = {}
@@ -355,8 +356,12 @@ def test_turn_and_item_notifications_reach_only_a_subscribed_peer(fake_pair):
     assert by_method["turn/started"][0]["threadId"] == fake2.thread_id
 
     user_item, agent_item = by_method["item/started"]
-    assert user_item["item"]["type"] == "userMessage"
-    assert user_item["item"]["content"] == [{"type": "text", "text": "hi"}]
+    assert user_item["item"] == {
+        "type": "userMessage",
+        "id": f"user_{turn_id}",
+        "content": [{"type": "text", "text": "hi"}],
+        "clientId": None,
+    }
     assert user_item["turnId"] == turn_id
     assert isinstance(user_item["startedAtMs"], int)
     assert agent_item["item"]["type"] == "agentMessage"
@@ -365,7 +370,10 @@ def test_turn_and_item_notifications_reach_only_a_subscribed_peer(fake_pair):
     assert "".join(deltas) == "hello there"
     assert by_method["item/agentMessage/delta"][0]["itemId"] == agent_item["item"]["id"]
 
-    completed = by_method["item/completed"][0]
+    user_completed, completed = by_method["item/completed"]
+    assert user_completed["item"] == user_item["item"]
+    assert user_completed["turnId"] == turn_id
+    assert isinstance(user_completed["completedAtMs"], int)
     assert completed["item"] == {
         "type": "agentMessage",
         "id": agent_item["item"]["id"],
@@ -403,6 +411,15 @@ def test_turn_start_result_is_a_turn_object_with_an_id(fake_pair):
         "durationMs": None,
     }
     assert fake.turns == [params]
+
+
+def test_forbidden_methods_are_recorded_with_the_method_that_was_called(fake_pair):
+    fake, peer = fake_pair()
+    _initialize(peer)
+    for method in CONTRACT["forbidden_methods"]:
+        assert peer.call(method, {"threadId": fake.thread_id})["result"] == {}
+    assert [call["method"] for call in fake.forbidden_calls] == CONTRACT["forbidden_methods"]
+    assert fake.forbidden_calls[0]["params"] == {"threadId": fake.thread_id}
 
 
 # --- the two traps ---------------------------------------------------------
