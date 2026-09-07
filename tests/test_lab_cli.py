@@ -2,16 +2,17 @@
 
 Everything here is hermetic: fake ``claude``/``codex`` executables, an injected
 doctor report, fake Claude Channel host / Codex App Server peers behind a real
-``RouterServer``, a scripted prompter instead of ``input()``, and a temporary
-copy of the experiments document. The *real* document is only ever read -- one
-test asserts it still says ``TBD``, because a verdict may only be written by a
+``RouterServer``, a scripted prompter instead of ``input()``, and a synthetic
+experiments-document fixture (never the real file). The *real* document is
+only ever read -- one test asserts its four ``Verdict:`` lines are well-formed
+(TBD, or PASS/FAIL with a run reference) and that ``lab_report`` agrees with
+whatever the file currently says, because a verdict may only be written by a
 human who ran the procedure.
 """
 
 from __future__ import annotations
 
 import json
-import shutil
 import socket
 import threading
 import time
@@ -44,6 +45,53 @@ from .fakes.router_peer import RunningRouter
 
 DOCS = Path(__file__).resolve().parent.parent / "docs" / "experiments"
 REAL_DOC = DOCS / "2026-08-27-live-transport-semantics.md"
+
+# A synthetic stand-in for the real experiments document: same section/
+# heading/verdict-line shape ``lab_verdict`` and ``lab_report`` match against
+# (see ``_section_bounds``/``find_verdict_line`` in ``bridge.lab.cli``), but
+# with content the tests own outright -- never coupled to the live document's
+# real-world resolution state.
+SYNTHETIC_DOC_TEXT = """\
+# Live-transport experiments E-H (test fixture)
+
+### Running with `bridge lab`
+
+This is a synthetic stand-in for the real experiments document, used only to
+exercise `bridge lab verdict`/`bridge lab report` in tests.
+
+## Experiment E — Claude Channel delivery and reply
+
+**Question.** Does an event delivered over a Claude development Channel reach
+the exact idle session?
+
+Verdict: TBD (requires live Claude session + human observer)
+
+---
+
+## Experiment F — Codex App Server shared control
+
+**Question.** Can a Bridge client and a remote Codex TUI share one App Server?
+
+Verdict: TBD (requires live Codex session + human observer)
+
+---
+
+## Experiment G — Busy-session serialization
+
+**Question.** Is an inbound call delivered during an unrelated active turn
+serialized with no accidental `turn/steer`?
+
+Verdict: TBD (requires live Claude+Codex sessions + human observer)
+
+---
+
+## Experiment H — Lifecycle and reconnect
+
+**Question.** How do session ids, reachability, queued deadlines, and
+resumption behave across restarts?
+
+Verdict: TBD (requires live Claude+Codex sessions + human observer)
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -96,7 +144,7 @@ def fake_vendor_env(tmp_path: Path) -> dict[str, str]:
 def temp_doc(tmp_path: Path) -> Path:
     dest = tmp_path / "doc" / REAL_DOC.name
     dest.parent.mkdir(parents=True)
-    shutil.copyfile(REAL_DOC, dest)
+    dest.write_text(SYNTHETIC_DOC_TEXT, encoding="utf-8")
     return dest
 
 
@@ -788,13 +836,31 @@ def test_report_notices_a_missing_verdict_line(tmp_path):
     assert "expected exactly 4" in out.text
 
 
-def test_the_real_document_is_untouched_and_still_tbd():
+def test_the_real_document_has_one_verdict_line_per_experiment_and_report_reflects_it():
     """The harness must never fabricate a verdict: only a human who ran the
-    procedure on live sessions may resolve one."""
-    out = Out()
-    assert lab_report(doc=REAL_DOC, out=out) == 1
+    procedure on live sessions may resolve one, and a resolved line must carry
+    a run reference proving it. This test tracks whatever the live document
+    currently says (TBD or resolved) rather than assuming a fixed state."""
     text = REAL_DOC.read_text()
-    assert text.count("Verdict: TBD") == 4
+    verdict_lines = [ln for ln in text.splitlines() if ln.startswith("Verdict:")]
+    assert len(verdict_lines) == 4
+
+    for name, line in zip(EXPERIMENTS, verdict_lines, strict=True):
+        assert (
+            line.startswith("Verdict: TBD")
+            or line.startswith("Verdict: PASS —")
+            or line.startswith("Verdict: FAIL —")
+        ), f"Experiment {name}: unexpected verdict line {line!r}"
+        if not line.startswith("Verdict: TBD"):
+            assert "docs/experiments/runs/" in line or "(run: " in line, (
+                f"Experiment {name}: resolved verdict has no run reference: {line!r}"
+            )
+
+    any_tbd = any(line.startswith("Verdict: TBD") for line in verdict_lines)
+    expected_rc = 1 if any_tbd else 0
+
+    out = Out()
+    assert lab_report(doc=REAL_DOC, out=out) == expected_rc
     assert find_repo_root(REAL_DOC.parent) == REAL_DOC.resolve().parents[2]
     # ... and the harness is documented there, without touching those lines.
     assert "Running with `bridge lab`" in text
