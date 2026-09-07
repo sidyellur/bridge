@@ -27,7 +27,7 @@ from .fakes.claude_host import FakeClaudeHost
 from .fakes.router_peer import RunningRouter
 
 
-def _make_channel(rr, session_id, *, auto_reply=None, paths=None):
+def _make_channel(rr, paths, session_id, *, auto_reply=None):
     host_sock, adapter_sock = socket.socketpair()
     adapter = ClaudeChannelAdapter(session_id, adapter_sock, paths=paths)
     adapter.connect_router(
@@ -49,9 +49,22 @@ def _wait_reachable(client, sid, timeout=3.0):
     return False
 
 
+def _wait_for_handshake(paths, sid, timeout=3.0) -> dict:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            meta = json.loads(paths.session_meta(sid).read_text())
+        except (OSError, json.JSONDecodeError):
+            meta = {}
+        if "handshake" in meta:
+            return meta
+        time.sleep(0.02)
+    raise AssertionError(f"no handshake recorded for {sid}")
+
+
 def test_initialize_declares_the_experimental_channel_capability(paths):
     with RunningRouter(paths) as rr:
-        _adapter, host = _make_channel(rr, "claude-1")
+        _adapter, host = _make_channel(rr, paths, "claude-1")
         result = host.initialize()
         caps = result["capabilities"]
         assert caps["experimental"][CHANNEL_CAPABILITY] == {}
@@ -62,7 +75,7 @@ def test_initialize_declares_the_experimental_channel_capability(paths):
 
 def test_initialize_never_echoes_the_client_protocol_version(paths):
     with RunningRouter(paths) as rr:
-        _adapter, host = _make_channel(rr, "claude-1")
+        _adapter, host = _make_channel(rr, paths, "claude-1")
         result = host.rpc.request(
             "initialize",
             {
@@ -76,7 +89,7 @@ def test_initialize_never_echoes_the_client_protocol_version(paths):
 
 def test_tools_list_has_all_tools_with_anti_retrieval(paths):
     with RunningRouter(paths) as rr:
-        _adapter, host = _make_channel(rr, "claude-1")
+        _adapter, host = _make_channel(rr, paths, "claude-1")
         host.initialize()
         tools = host.list_tools()["tools"]
         names = {t["name"] for t in tools}
@@ -88,16 +101,13 @@ def test_tools_list_has_all_tools_with_anti_retrieval(paths):
 
 def test_initialized_makes_session_reachable_and_records_the_handshake(paths):
     with RunningRouter(paths) as rr:
-        _adapter, host = _make_channel(rr, "claude-1", paths=paths)
+        _adapter, host = _make_channel(rr, paths, "claude-1")
         host.initialize()
         host.initialized()
         ctrl = rr.client(session_id="ctrl")
         assert _wait_reachable(ctrl, "claude-1")
 
-        deadline = time.time() + 3.0
-        while not paths.session_meta("claude-1").exists() and time.time() < deadline:
-            time.sleep(0.02)
-        meta = json.loads(paths.session_meta("claude-1").read_text())
+        meta = _wait_for_handshake(paths, "claude-1")
         assert meta["handshake"]["client_info"]["name"] == "fake-claude"
         assert meta["handshake"]["client_capabilities"] == {}
 
@@ -106,25 +116,20 @@ def test_handshake_merges_into_existing_session_meta(paths):
     with RunningRouter(paths) as rr:
         paths.ensure_session_dir("claude-1")
         paths.session_meta("claude-1").write_text(json.dumps({"family": "claude"}))
-        _adapter, host = _make_channel(rr, "claude-1", paths=paths)
+        _adapter, host = _make_channel(rr, paths, "claude-1")
         host.initialize()
         host.initialized()
         ctrl = rr.client(session_id="ctrl")
         assert _wait_reachable(ctrl, "claude-1")
 
-        deadline = time.time() + 3.0
-        while time.time() < deadline:
-            meta = json.loads(paths.session_meta("claude-1").read_text())
-            if "handshake" in meta:
-                break
-            time.sleep(0.02)
+        meta = _wait_for_handshake(paths, "claude-1")
         assert meta["family"] == "claude"
         assert meta["handshake"]["client_info"]["version"] == "0"
 
 
 def test_inbound_call_delivered_and_reply_returns_to_caller(paths):
     with RunningRouter(paths) as rr:
-        _adapter, host = _make_channel(rr, "claude-1", auto_reply="use the cache")
+        _adapter, host = _make_channel(rr, paths, "claude-1", auto_reply="use the cache")
         host.initialize()
         host.initialized()
 
@@ -153,7 +158,7 @@ def test_inbound_call_delivered_and_reply_returns_to_caller(paths):
 
 def test_text_delivered_as_channel_event(paths):
     with RunningRouter(paths) as rr:
-        _adapter, host = _make_channel(rr, "claude-1")
+        _adapter, host = _make_channel(rr, paths, "claude-1")
         host.initialize()
         host.initialized()
         caller = rr.client(session_id="codex-1")
@@ -185,7 +190,7 @@ def test_channel_meta_is_a_documented_attribute_map():
 
 def test_foreign_reply_rejected(paths):
     with RunningRouter(paths) as rr:
-        _adapter, host = _make_channel(rr, "claude-1")
+        _adapter, host = _make_channel(rr, paths, "claude-1")
         host.initialize()
         host.initialized()
         out = host.call_tool("reply", {"call_id": "does-not-exist", "answer": "hi"})
@@ -195,7 +200,7 @@ def test_foreign_reply_rejected(paths):
 
 def test_metadata_is_encoded_not_interpolated(paths):
     with RunningRouter(paths) as rr:
-        _adapter, host = _make_channel(rr, "claude-1", auto_reply="ok")
+        _adapter, host = _make_channel(rr, paths, "claude-1", auto_reply="ok")
         host.initialize()
         host.initialized()
         caller = rr.client(session_id="codex-1")

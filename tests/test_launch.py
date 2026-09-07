@@ -188,6 +188,30 @@ def test_run_wrapper_passes_identity_and_exit_code(paths, tmp_path, ids):
 # plain single-mode capture exe used above.
 
 
+def test_run_wrapper_claude_writes_a_session_meta_stub(paths, tmp_path, ids):
+    """doctor's handshake row can only warn about a session it knows exists."""
+    capture = tmp_path / "cap.jsonl"
+    bindir = tmp_path / "bin"
+    make_capture_exe(bindir, "claude", capture)
+
+    with RunningRouter(paths) as rr:
+        env = {"PATH": f"{bindir}", "BRIDGE_CLAUDE_BIN": str(bindir / "claude")}
+        result = run_wrapper(
+            "claude",
+            [],
+            paths=paths,
+            env=env,
+            new_id=ids.new,
+            ensure_running=lambda p: None,
+            connect=lambda paths, session_id, role: rr.client(session_id=session_id, role=role),
+            forward_signals=False,
+            print_address=False,
+        )
+
+    meta = json.loads(paths.session_meta(result.session_id).read_text())
+    assert meta == {"family": "claude"}
+
+
 def test_run_wrapper_claude_prints_channel_mode_line(paths, tmp_path, ids, capsys):
     capture = tmp_path / "cap.jsonl"
     bindir = tmp_path / "bin"

@@ -120,28 +120,21 @@ class ClaudeChannelAdapter:
         self._persist_handshake()
 
     def _persist_handshake(self) -> None:
-        """Best-effort: record the initialize handshake to session.json so `bridge
-        doctor` can tell a session that loaded the Bridge server from one that
-        never did. Never raises -- a session directory Bridge cannot write to
-        must not break the adapter."""
-        paths = self._paths or Paths.resolve()
-        meta_path = paths.session_meta(self.session_id)
-        data: dict[str, Any] = {}
-        try:
-            existing = json.loads(meta_path.read_text())
-        except (OSError, json.JSONDecodeError):
-            existing = None
-        if isinstance(existing, dict):
-            data = existing
-        data["handshake"] = {
-            "client_info": self.client_info,
-            "client_capabilities": self.client_capabilities,
-        }
-        try:
-            paths.ensure_session_dir(self.session_id)
-            meta_path.write_text(json.dumps(data))
-        except OSError:
-            pass
+        """Record the initialize handshake in session.json so `bridge doctor` can
+        tell a session that loaded the Bridge server from one that never did."""
+        # Never resolve paths here: the real entry point always injects them, and a
+        # fallback would let a test-constructed adapter write to the user's install.
+        if self._paths is None:
+            return
+        self._paths.merge_session_meta(
+            self.session_id,
+            {
+                "handshake": {
+                    "client_info": self.client_info,
+                    "client_capabilities": self.client_capabilities,
+                }
+            },
+        )
 
     def _tools_list(self, _params: dict[str, Any]) -> dict[str, Any]:
         return {"tools": all_tools()}

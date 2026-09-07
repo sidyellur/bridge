@@ -73,10 +73,12 @@ after the session address. Re-run `bridge install` after upgrading `claude` to
 re-detect and pick up a better mode. Claude Code never tells a server that it
 declined to load it as a channel — unregistered channels drop events silently —
 so **Claude channel handshake** in `bridge doctor` reports which sessions
-completed the MCP initialize handshake with Bridge. If a session is missing
-there, or events never arrive despite a recorded handshake, check the channels
-notice `claude` prints at startup: it names the channels it loaded and is the
-only place an allowlist or organization-policy rejection is visible.
+completed the MCP initialize handshake with Bridge. `bridge claude` records
+every session it launches, so one warned about there never loaded the Bridge
+server at all. When that row warns — or events never arrive despite a recorded
+handshake — check the channels notice `claude` prints at startup: it names the
+channels it loaded and is the only place an allowlist or organization-policy
+rejection is visible.
 
 ## Launch flow
 

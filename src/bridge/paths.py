@@ -8,9 +8,12 @@ state.
 
 from __future__ import annotations
 
+import json
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 BRIDGE_HOME_ENV = "BRIDGE_HOME"
 ROUTER_SOCKET_ENV = "BRIDGE_ROUTER_SOCKET"
@@ -78,6 +81,29 @@ class Paths:
 
     def codex_socket(self, session_id: str) -> Path:
         return self.session_dir(session_id) / "codex.sock"
+
+    def merge_session_meta(self, session_id: str, updates: Mapping[str, Any]) -> None:
+        """Best-effort top-level merge into ``session.json``. Never raises -- a
+        session directory Bridge cannot write to must not break the wrapper or
+        the adapter that called this."""
+        path = self.session_meta(session_id)
+        data: dict[str, Any] = {}
+        try:
+            existing = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):
+            existing = None
+        if isinstance(existing, dict):
+            data = existing
+        data.update(updates)
+        try:
+            self.ensure_session_dir(session_id)
+            # Write-then-rename: a reader (doctor, or the wrapper's own stub) must
+            # never observe the truncated window of an in-place rewrite.
+            tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+            tmp.write_text(json.dumps(data))
+            os.replace(tmp, path)
+        except OSError:
+            pass
 
     # --- construction -------------------------------------------------------
     def ensure(self) -> Paths:

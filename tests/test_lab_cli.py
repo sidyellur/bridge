@@ -110,9 +110,9 @@ def _wait_reachable(client, sid, *, state=None, timeout=3.0) -> bool:
     return False
 
 
-def _make_claude(rr, session_id, *, auto_reply=None):
+def _make_claude(rr, paths, session_id, *, auto_reply=None):
     host_sock, adapter_sock = socket.socketpair()
-    adapter = ClaudeChannelAdapter(session_id, adapter_sock)
+    adapter = ClaudeChannelAdapter(session_id, adapter_sock, paths=paths)
     adapter.connect_router(
         lambda on_event: rr.client(session_id=session_id, role="adapter", on_event=on_event)
     )
@@ -243,7 +243,7 @@ def _summary(run_dir: Path, name: str) -> dict:
 def test_run_e_sees_the_channel_notification_and_the_reply(paths, run_dir):
     out = Out()
     with RunningRouter(paths) as rr:
-        adapter, host = _make_claude(rr, "claude-1", auto_reply="experiment E ok")
+        adapter, host = _make_claude(rr, paths, "claude-1", auto_reply="experiment E ok")
         try:
             ctrl = rr.client(session_id="ctrl")
             assert _wait_reachable(ctrl, "claude-1")
@@ -272,7 +272,7 @@ def test_run_e_sees_the_channel_notification_and_the_reply(paths, run_dir):
 def test_run_e_fails_when_nobody_replies(paths, run_dir):
     out = Out()
     with RunningRouter(paths) as rr:
-        adapter, host = _make_claude(rr, "claude-1")  # no auto_reply
+        adapter, host = _make_claude(rr, paths, "claude-1")  # no auto_reply
         try:
             ctrl = rr.client(session_id="ctrl")
             assert _wait_reachable(ctrl, "claude-1")
@@ -471,7 +471,7 @@ def test_run_g_hard_fails_on_any_turn_steer_frame(paths, run_dir):
 def test_run_g_targets_the_explicit_claude_id_even_with_a_reachable_codex_session(paths, run_dir):
     out = Out()
     with RunningRouter(paths) as rr:
-        claude_adapter, claude_host = _make_claude(rr, "claude-1")
+        claude_adapter, claude_host = _make_claude(rr, paths, "claude-1")
         codex_adapter, codex_server = _make_codex(rr, "codex-1")
         try:
             ctrl = rr.client(session_id="ctrl")
@@ -597,7 +597,7 @@ def test_run_h_records_reachability_transitions_with_a_scripted_prompter(paths, 
     prompts: list[str] = []
 
     with RunningRouter(paths) as rr:
-        adapter, host = _make_claude(rr, "claude-1")
+        adapter, host = _make_claude(rr, paths, "claude-1")
         live["adapter"], live["host"] = adapter, host
         ctrl = rr.client(session_id="ctrl")
         assert _wait_reachable(ctrl, "claude-1")
@@ -610,7 +610,7 @@ def test_run_h_records_reachability_transitions_with_a_scripted_prompter(paths, 
                 live["adapter"].close()
                 live["host"].close()
             elif step == 1:  # restart it under the same Bridge session id
-                live["adapter"], live["host"] = _make_claude(rr, "claude-1")
+                live["adapter"], live["host"] = _make_claude(rr, paths, "claude-1")
             elif step == 2:  # stop the router
                 rr.server.stop()
                 time.sleep(0.3)

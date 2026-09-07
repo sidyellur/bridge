@@ -276,14 +276,16 @@ def test_handshake_check_ok_when_every_claude_session_initialized(paths, fake_us
 
 
 def test_handshake_check_warns_when_a_session_never_initialized(paths, fake_user_home):
+    """The `bridge claude` wrapper leaves this stub; a session that never loaded
+    the channel adds no `handshake` to it, which is what the row must catch."""
     _install(paths, fake_user_home)
-    paths.ensure_session_dir("claude-1")
-    paths.session_meta("claude-1").write_text(json.dumps({"family": "claude"}))
+    paths.merge_session_meta("claude-1", {"family": "claude"})
     report = _doctor(paths, fake_user_home)
     assert _status(report, "Claude channel handshake") == WARN
-    detail = _detail(report, "Claude channel handshake")
-    assert "session claude-1 has no recorded initialize handshake" in detail
-    assert "startup channels notice" in detail
+    assert _detail(report, "Claude channel handshake") == (
+        "session claude-1 has no recorded initialize handshake; Claude may not "
+        "have loaded the Bridge server (check the startup channels notice)"
+    )
     assert report.ok  # WARN alone does not fail the overall report
 
 
