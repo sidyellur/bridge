@@ -311,6 +311,8 @@ class LabContext:
     now: Callable[[], float] = time.time
     seed_call: bool = False
     router_kill: bool = True
+    explicit_claude: bool = False
+    explicit_codex: bool = False
     records: list[dict[str, Any]] = field(default_factory=list)
 
     def observe(self) -> list[dict[str, Any]]:
@@ -575,10 +577,23 @@ def _run_f(ctx: LabContext) -> tuple[int, dict[str, Any]]:
 
 
 def _run_g(ctx: LabContext) -> tuple[int, dict[str, Any]]:
-    target = ctx.codex_id or ctx.claude_id
+    if ctx.explicit_claude and ctx.explicit_codex:
+        raise LabError(
+            "Experiment G targets one family per run; pass only --claude or only --codex"
+        )
+    if ctx.explicit_claude:
+        target, family = ctx.claude_id, "claude"
+    elif ctx.explicit_codex:
+        target, family = ctx.codex_id, "codex"
+    else:
+        target = ctx.codex_id or ctx.claude_id
+        family = "codex" if target == ctx.codex_id else "claude"
+        if target:
+            ctx.out(
+                f"G target: {family} {target} (auto-picked; pass --claude or --codex to choose)"
+            )
     if not target:
         raise LabError("Experiment G needs a target; pass --codex <id> or --claude <id>")
-    family = "codex" if target == ctx.codex_id else "claude"
     ctx.tail.mark()
 
     ctx.out(f"waiting for {target} ({family}) to report state=working ...")
@@ -833,6 +848,8 @@ def lab_run(
         now=now,
         seed_call=seed_call,
         router_kill=router_kill,
+        explicit_claude=claude_id is not None,
+        explicit_codex=codex_id is not None,
     )
     try:
         _resolve_session_ids(ctx)
