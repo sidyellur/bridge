@@ -25,6 +25,7 @@ from bridge.codex_app_server import (
     MIN_CODEX_VERSION,
     N_INITIALIZED,
     N_ITEM_DELTA,
+    N_THREAD_STARTED,
     N_THREAD_STATUS,
     N_TURN_COMPLETED,
     OPT_OUT_NOTIFICATION_METHODS,
@@ -155,7 +156,19 @@ def test_initialize_parses_the_codex_version_from_the_user_agent(client_pair):
     assert client.codex_version == "0.151.0"
     assert client.codex_version_warning is None
     assert client.server_info["userAgent"] == result["userAgent"]
-    assert parse_codex_version(result["userAgent"]) == (0, 151, 0)
+
+    for user_agent, expected in (
+        ("bridge/0.151.0 (Mac OS 15.5.0; arm64) iTerm.app/3.6.11 (bridge; 0.1.0)", (0, 151, 0)),
+        ("bridge/0.151.0-rc1 (Mac OS 15.5.0; arm64)", (0, 151, 0)),
+        # Only the version token is read: neither the OS version nor the client
+        # version trailing it may stand in for a missing codex version.
+        ("codex/dev (Mac OS 15.5.0; arm64) iTerm.app/3.6.11 (codex; 0.1.0)", None),
+        ("bridge/unknown (Fake OS 1.0; arm64) fake-term/0 (bridge; 0.1.0)", None),
+        ("bridge/0.152 (Mac OS 15.5.0; arm64)", None),
+        ("bridge/", None),
+        ("no-slash-at-all", None),
+    ):
+        assert parse_codex_version(user_agent) == expected, user_agent
 
 
 def test_initialize_rejects_a_version_below_the_minimum(client_pair):
@@ -165,7 +178,7 @@ def test_initialize_rejects_a_version_below_the_minimum(client_pair):
 
 
 def test_initialize_rejects_an_unparsable_user_agent(client_pair):
-    client, _fake, _rec = client_pair(codex_version="unknown", client_version="dev")
+    client, _fake, _rec = client_pair(codex_version="unknown")
     with pytest.raises(UnsupportedCodexVersion, match="could not parse a codex version"):
         client.initialize()
 
@@ -364,6 +377,22 @@ def test_thread_status_changed_maps_every_variant(client_pair):
     fake._notify(N_THREAD_STATUS, {"threadId": fake.thread_id, "status": {"type": "martian"}})
     _sync(client)
     assert client.status == STATUS_WORKING
+
+
+def test_malformed_frames_are_ignored(client_pair):
+    client, fake, rec = client_pair()
+    _bound(client, fake)
+    rec.statuses.clear()
+    rec.bound.clear()
+
+    fake._notify(N_THREAD_STATUS, {"threadId": fake.thread_id, "status": "active"})
+    fake._notify(N_THREAD_STARTED, {"thread": "thread-abc"})
+    _sync(client)
+
+    assert client.status == STATUS_IDLE
+    assert client.thread_id == fake.thread_id
+    assert rec.statuses == []
+    assert rec.bound == []
 
 
 # --- turns -----------------------------------------------------------------

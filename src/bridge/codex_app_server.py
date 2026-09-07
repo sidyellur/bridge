@@ -111,12 +111,19 @@ def parse_codex_version(user_agent: str) -> tuple[int, int, int] | None:
     """The codex version embedded in an ``initialize`` ``userAgent``.
 
     ``"bridge/0.151.0 (Mac OS 15.5.0; arm64) iTerm.app/3.6.11 (bridge; 0.1.0)"``
-    → ``(0, 151, 0)``; ``None`` when there is no version triple to find.
+    → ``(0, 151, 0)``; ``None`` when that token is not a version triple.
+
+    Only the first whitespace-delimited token after the first ``/`` is read, and
+    the triple must start it: a dev build (``"codex/dev (Mac OS 15.5.0; …)"``)
+    must not pick up the OS version further along the string.
     """
     _, sep, rest = user_agent.partition("/")
     if not sep:
         return None
-    match = _VERSION_RE.search(rest)
+    head = rest.split(maxsplit=1)
+    if not head:
+        return None
+    match = _VERSION_RE.match(head[0])
     if match is None:
         return None
     return (int(match.group(1)), int(match.group(2)), int(match.group(3)))
@@ -329,7 +336,9 @@ class CodexAppServerClient:
 
     # --- notification handlers (reader thread; never issue a request) -------
     def _on_thread_started(self, params: dict[str, Any]) -> None:
-        thread = params.get("thread") or {}
+        thread = params.get("thread")
+        if not isinstance(thread, Mapping):
+            return
         thread_id = thread.get("id")
         if not thread_id or thread_id in self.own_thread_ids:
             return
@@ -345,7 +354,9 @@ class CodexAppServerClient:
         self._apply_thread_status(params.get("status"))
 
     def _apply_thread_status(self, status: Any) -> None:
-        status_type = (status or {}).get("type")
+        if not isinstance(status, Mapping):
+            return
+        status_type = status.get("type")
         if status_type not in THREAD_STATUS_TO_STATE:
             return
         if status_type == THREAD_STATUS_SYSTEM_ERROR:
