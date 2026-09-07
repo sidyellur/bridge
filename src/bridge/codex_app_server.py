@@ -26,6 +26,7 @@ constants and the fixture agree in both directions.
 
 from __future__ import annotations
 
+import json
 import re
 import socket
 import subprocess
@@ -35,6 +36,7 @@ from pathlib import Path
 from typing import Any
 
 from .mcp import INVALID_REQUEST, METHOD_NOT_FOUND, Framing, JsonRpcError, RpcEndpoint
+from .paths import BRIDGE_HOME_ENV, ROUTER_SOCKET_ENV, ROUTER_TOKEN_ENV, SESSION_ID_ENV
 
 M_INITIALIZE = "initialize"
 M_THREAD_LIST = "thread/loaded/list"
@@ -136,10 +138,45 @@ def parse_codex_version(user_agent: str) -> tuple[int, int, int] | None:
 # test asserts they match.
 LAUNCH_ARGV: tuple[str, ...] = ("{binary}", "app-server", "--listen", "unix://{socket_path}")
 
+#: Bridge's own identity env vars, forwarded onto the App Server launch line
+#: as ``-c mcp_servers.bridge.env.<KEY>=<value>`` overrides, in this fixed
+#: order. Codex does not pass its own environment through to the MCP servers
+#: it spawns from ``~/.codex/config.toml``, so without these overrides the
+#: ``bridge serve --family codex`` process the App Server starts never sees
+#: `BRIDGE_SESSION_ID` and exits immediately. Mirrored verbatim as
+#: "mcp_env_keys" in tests/fixtures/codex_protocol/codex-0.151.0.json.
+MCP_ENV_KEYS: tuple[str, ...] = (
+    SESSION_ID_ENV,
+    ROUTER_SOCKET_ENV,
+    ROUTER_TOKEN_ENV,
+    BRIDGE_HOME_ENV,
+)
 
-def build_launch_argv(binary: str, socket_path: object) -> list[str]:
-    """Fill :data:`LAUNCH_ARGV` for a concrete binary and socket path."""
-    return [tok.format(binary=binary, socket_path=socket_path) for tok in LAUNCH_ARGV]
+#: One ``-c`` override token, formatted with ``value`` already JSON-encoded
+#: (a JSON string is a valid TOML basic string, which is how Codex parses
+#: `-c key=value`). Mirrored verbatim as "mcp_env_override" in the fixture.
+MCP_ENV_OVERRIDE = "mcp_servers.bridge.env.{key}={value}"
+
+
+def build_launch_argv(
+    binary: str, socket_path: object, *, mcp_env: Mapping[str, str] | None = None
+) -> list[str]:
+    """Fill :data:`LAUNCH_ARGV` for a concrete binary and socket path.
+
+    When ``mcp_env`` is given, append one ``-c`` pair per :data:`MCP_ENV_KEYS`
+    entry present in it (fixed key order, so the argv is deterministic), each
+    formatted via :data:`MCP_ENV_OVERRIDE`. A key absent from ``mcp_env`` is
+    skipped. No ``mcp_env`` (or an empty one) leaves the argv exactly as it
+    was before this option existed.
+    """
+    argv = [tok.format(binary=binary, socket_path=socket_path) for tok in LAUNCH_ARGV]
+    if mcp_env:
+        for key in MCP_ENV_KEYS:
+            if key not in mcp_env:
+                continue
+            argv.append("-c")
+            argv.append(MCP_ENV_OVERRIDE.format(key=key, value=json.dumps(mcp_env[key])))
+    return argv
 
 
 class UnsupportedCodexVersion(Exception):
@@ -479,8 +516,9 @@ class CodexAppServerProcess:
         env: dict[str, str] | None = None,
         *,
         spawn: Callable[..., subprocess.Popen] = subprocess.Popen,
+        mcp_env: Mapping[str, str] | None = None,
     ) -> subprocess.Popen:
-        argv = build_launch_argv(self.binary, self.socket_path)
+        argv = build_launch_argv(self.binary, self.socket_path, mcp_env=mcp_env)
         self.proc = spawn(argv, env=env)
         return self.proc
 

@@ -39,9 +39,17 @@ CAPTURE = {capture!r}
 RELEASE_FILE = {release_file!r}
 TUI_EXIT_CODE = {tui_exit_code!r}
 WATCH_KEYS = {watch_keys!r}
+APP_SERVER_CAPTURE = {app_server_capture!r}
 
 
 def _app_server(argv):
+    # `argv` may also carry `-c key=value` override pairs (Bridge's
+    # `mcp_servers.bridge.env.*` identity overrides); scanning for the exact
+    # token "--listen" rather than a fixed position keeps this immune to
+    # those, however many are appended.
+    if APP_SERVER_CAPTURE:
+        with open(APP_SERVER_CAPTURE, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps({{"app_server_argv": argv}}) + "\\n")
     listen = None
     for i, a in enumerate(argv):
         if a == "--listen" and i + 1 < len(argv):
@@ -162,6 +170,7 @@ def make_fake_codex_exe(
     auto_complete: bool = True,
     watch_keys: list[str] | None = None,
     codex_version: str = "0.151.0",
+    app_server_capture: Path | None = None,
 ) -> Path:
     """Write a dual-mode fake ``codex`` executable to ``directory/codex``.
 
@@ -170,6 +179,12 @@ def make_fake_codex_exe(
     as the TUI, which captures argv/env to ``capture`` and blocks on ``release_file``
     (if given) before exiting with ``tui_exit_code``. ``codex_version`` lets a
     test simulate an App Server too old for the pinned contract.
+
+    ``app_server_capture``, if given, gets one JSON line per App Server launch
+    -- ``{{"app_server_argv": argv}}`` -- recorded before anything else runs, so
+    a test can assert on the ``-c mcp_servers.bridge.env.*`` overrides Bridge
+    appends to the launch line without disturbing the TUI-only ``capture``
+    file the rest of the suite already relies on.
     """
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / "codex"
@@ -183,6 +198,7 @@ def make_fake_codex_exe(
         watch_keys=watch_keys or DEFAULT_WATCH_KEYS,
         codex_version=codex_version,
         repo_paths=REPO_PATHS,
+        app_server_capture=str(app_server_capture) if app_server_capture is not None else None,
     )
     path.write_text(script, encoding="utf-8")
     path.chmod(0o755)

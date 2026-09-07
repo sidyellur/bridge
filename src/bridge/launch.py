@@ -319,7 +319,7 @@ def _run_codex_wrapper(
     session is registered/reachable, *then* attach the remote TUI. Tears down
     in reverse order on exit, reaping both children."""
     from .adapters.codex import CodexAdapter
-    from .codex_app_server import CodexAppServerClient, CodexAppServerProcess
+    from .codex_app_server import MCP_ENV_KEYS, CodexAppServerClient, CodexAppServerProcess
 
     session_id = new_id()
     paths.ensure_session_dir(session_id)
@@ -329,7 +329,11 @@ def _run_codex_wrapper(
     child_env = build_identity_env(paths, session_id, base_env)
 
     app_server = CodexAppServerProcess(socket_path, binary=binary)
-    app_server.start(env=child_env, spawn=spawn)
+    app_server.start(
+        env=child_env,
+        spawn=spawn,
+        mcp_env={key: child_env[key] for key in MCP_ENV_KEYS if key in child_env},
+    )
     try:
         app_server.wait_for_socket(app_server_timeout, sleep=sleep, now=now)
     except Exception:

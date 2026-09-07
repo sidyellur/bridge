@@ -98,8 +98,12 @@ bridge codex  [codex args...]
 channel: for every `bridge codex` invocation, the wrapper itself owns one
 Codex App Server for the lifetime of that session, in this order:
 
-1. Spawn `codex app-server --listen unix://~/.bridge/sessions/<id>/codex.sock`
-   and wait (bounded, with a clear error otherwise) for that socket to appear.
+1. Spawn `codex app-server --listen unix://~/.bridge/sessions/<id>/codex.sock`,
+   adding `-c mcp_servers.bridge.env.*` overrides for the session's identity
+   so Codex's own MCP client can start Bridge's tool server (`bridge serve
+   --family codex`, from `~/.codex/config.toml`) with it — Codex does not
+   pass its environment through to the MCP servers it spawns — and wait
+   (bounded, with a clear error otherwise) for that socket to appear.
 2. Connect Bridge's own adapter to it over **WebSocket** (`codex app-server`
    speaks RFC 6455 on that same Unix socket) — handshake, register with the
    router, bind the exact thread the remote TUI creates, and best-effort

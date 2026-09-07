@@ -114,6 +114,73 @@ def test_app_server_socket_exists_before_tui_spawn_and_remote_arg(paths, codex_b
         assert result_box["result"].session_id in records[0]["argv"][1]
 
 
+def test_app_server_is_launched_with_mcp_env_overrides(paths, tmp_path, ids):
+    """Codex scrubs the environment it hands to the MCP servers it starts
+    from ``~/.codex/config.toml``, so the App Server line must carry the
+    session identity itself as ``-c mcp_servers.bridge.env.*`` overrides --
+    otherwise `bridge serve --family codex` never sees `BRIDGE_SESSION_ID`
+    and exits (see src/bridge/codex_app_server.py::MCP_ENV_KEYS)."""
+    bindir = tmp_path / "bin"
+    capture = tmp_path / "tui_cap.jsonl"
+    release = tmp_path / "release"
+    app_server_capture = tmp_path / "app_server_cap.jsonl"
+    make_fake_codex_exe(
+        bindir,
+        capture=capture,
+        release_file=release,
+        app_server_capture=app_server_capture,
+    )
+
+    with RunningRouter(paths) as rr:
+        env = {"PATH": str(bindir), "BRIDGE_CODEX_BIN": str(bindir / "codex")}
+        result_box = {}
+
+        def go():
+            result_box["result"] = run_wrapper(
+                "codex",
+                [],
+                paths=paths,
+                env=env,
+                new_id=ids.new,
+                ensure_running=lambda p: None,
+                connect=lambda paths, session_id, role, on_event=None: _connect_with_events(
+                    rr, paths, session_id, role, on_event
+                ),
+                forward_signals=False,
+                print_address=False,
+            )
+
+        t = threading.Thread(target=go)
+        t.start()
+        try:
+            assert _wait_for(
+                lambda: app_server_capture.exists() and read_captures(app_server_capture)
+            ), "app-server argv was never recorded"
+            assert _wait_for(lambda: capture.exists() and read_captures(capture))
+        finally:
+            release.write_text("go")
+            t.join(timeout=10)
+
+        assert result_box["result"].returncode == 0
+        session_id = result_box["result"].session_id
+        argv = read_captures(app_server_capture)[0]["app_server_argv"]
+        assert argv[:3] == [
+            "app-server",
+            "--listen",
+            f"unix://{paths.codex_socket(session_id)}",
+        ]
+        assert argv[3:] == [
+            "-c",
+            f"mcp_servers.bridge.env.BRIDGE_SESSION_ID={json.dumps(session_id)}",
+            "-c",
+            f"mcp_servers.bridge.env.BRIDGE_ROUTER_SOCKET={json.dumps(str(paths.socket))}",
+            "-c",
+            f"mcp_servers.bridge.env.BRIDGE_ROUTER_TOKEN_PATH={json.dumps(str(paths.token))}",
+            "-c",
+            f"mcp_servers.bridge.env.BRIDGE_HOME={json.dumps(str(paths.home))}",
+        ]
+
+
 def test_session_registered_reachable_and_idle_while_tui_runs(paths, codex_bin, ids):
     bindir, capture, release = codex_bin
     make_fake_codex_exe(bindir, capture=capture, release_file=release, tui_exit_code=0)

@@ -13,9 +13,16 @@ import pytest
 
 from bridge.codex_app_server import (
     LAUNCH_ARGV,
+    MCP_ENV_KEYS,
     CodexAppServerProcess,
     CodexAppServerStartError,
     build_launch_argv,
+)
+from bridge.paths import (
+    BRIDGE_HOME_ENV,
+    ROUTER_SOCKET_ENV,
+    ROUTER_TOKEN_ENV,
+    SESSION_ID_ENV,
 )
 
 
@@ -74,6 +81,66 @@ def test_build_launch_argv_fills_template():
     assert argv[0] != LAUNCH_ARGV[0]  # the template itself is unfilled
 
 
+def test_build_launch_argv_without_mcp_env_is_byte_identical():
+    # No mcp_env at all, and an explicit empty mapping, must both leave argv
+    # exactly as it is today -- no `-c` tokens appended.
+    base = ["codex", "app-server", "--listen", "unix:///tmp/x/codex.sock"]
+    assert build_launch_argv("codex", "/tmp/x/codex.sock") == base
+    assert build_launch_argv("codex", "/tmp/x/codex.sock", mcp_env=None) == base
+    assert build_launch_argv("codex", "/tmp/x/codex.sock", mcp_env={}) == base
+
+
+def test_build_launch_argv_appends_mcp_env_overrides_in_fixed_key_order():
+    mcp_env = {
+        # Given out of order to prove the output order is MCP_ENV_KEYS, not
+        # insertion order.
+        BRIDGE_HOME_ENV: "/home/u/.bridge",
+        ROUTER_TOKEN_ENV: "/home/u/.bridge/router.token",
+        SESSION_ID_ENV: "s-1",
+        ROUTER_SOCKET_ENV: "/home/u/.bridge/router.sock",
+    }
+    argv = build_launch_argv("codex", "/tmp/x/codex.sock", mcp_env=mcp_env)
+    assert argv == [
+        "codex",
+        "app-server",
+        "--listen",
+        "unix:///tmp/x/codex.sock",
+        "-c",
+        'mcp_servers.bridge.env.BRIDGE_SESSION_ID="s-1"',
+        "-c",
+        'mcp_servers.bridge.env.BRIDGE_ROUTER_SOCKET="/home/u/.bridge/router.sock"',
+        "-c",
+        'mcp_servers.bridge.env.BRIDGE_ROUTER_TOKEN_PATH="/home/u/.bridge/router.token"',
+        "-c",
+        'mcp_servers.bridge.env.BRIDGE_HOME="/home/u/.bridge"',
+    ]
+    assert MCP_ENV_KEYS == (
+        SESSION_ID_ENV,
+        ROUTER_SOCKET_ENV,
+        ROUTER_TOKEN_ENV,
+        BRIDGE_HOME_ENV,
+    )
+
+
+def test_build_launch_argv_skips_keys_missing_from_mcp_env():
+    argv = build_launch_argv("codex", "/tmp/x/codex.sock", mcp_env={SESSION_ID_ENV: "s-1"})
+    assert argv == [
+        "codex",
+        "app-server",
+        "--listen",
+        "unix:///tmp/x/codex.sock",
+        "-c",
+        'mcp_servers.bridge.env.BRIDGE_SESSION_ID="s-1"',
+    ]
+
+
+def test_build_launch_argv_json_escapes_a_quote_in_the_value():
+    argv = build_launch_argv(
+        "codex", "/tmp/x/codex.sock", mcp_env={SESSION_ID_ENV: 'weird"id'}
+    )
+    assert argv[-1] == 'mcp_servers.bridge.env.BRIDGE_SESSION_ID="weird\\"id"'
+
+
 def test_start_spawns_with_pinned_argv_and_env():
     captured = {}
 
@@ -87,6 +154,25 @@ def test_start_spawns_with_pinned_argv_and_env():
     assert captured["argv"] == ["codex", "app-server", "--listen", "unix:///tmp/x/codex.sock"]
     assert captured["env"] == {"FOO": "bar"}
     assert p is proc.proc
+
+
+def test_start_passes_mcp_env_through_to_build_launch_argv():
+    captured = {}
+
+    def spawn(argv, env=None):
+        captured["argv"] = argv
+        return FakePopen(argv, env)
+
+    proc = CodexAppServerProcess("/tmp/x/codex.sock", binary="codex")
+    proc.start(env={"FOO": "bar"}, spawn=spawn, mcp_env={SESSION_ID_ENV: "s-1"})
+    assert captured["argv"] == [
+        "codex",
+        "app-server",
+        "--listen",
+        "unix:///tmp/x/codex.sock",
+        "-c",
+        'mcp_servers.bridge.env.BRIDGE_SESSION_ID="s-1"',
+    ]
 
 
 def test_wait_for_socket_succeeds_once_it_appears(tmp_path):

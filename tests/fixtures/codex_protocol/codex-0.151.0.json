@@ -89,5 +89,7 @@
   "forbidden_methods": ["turn/steer", "turn/interrupt", "review/start"],
   "bridge_state_map": { "idle": "idle", "active": "working", "notLoaded": "idle", "systemError": "idle" },
   "launch_argv": ["{binary}", "app-server", "--listen", "unix://{socket_path}"],
+  "mcp_env_override": "mcp_servers.bridge.env.{key}={value}",
+  "mcp_env_keys": ["BRIDGE_SESSION_ID", "BRIDGE_ROUTER_SOCKET", "BRIDGE_ROUTER_TOKEN_PATH", "BRIDGE_HOME"],
   "_regenerate": "codex app-server generate-json-schema --out /tmp/codex-schema-$(codex --version | awk '{print $2}') && python tools/diff_codex_contract.py /tmp/codex-schema-<ver> tests/fixtures/codex_protocol/codex-<ver>.json"
 }

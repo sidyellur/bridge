@@ -23,6 +23,8 @@ from bridge.codex_app_server import (
     FORBIDDEN_METHODS,
     ITEM_AGENT_MESSAGE,
     LAUNCH_ARGV,
+    MCP_ENV_KEYS,
+    MCP_ENV_OVERRIDE,
     MIN_CODEX_VERSION,
     N_INITIALIZED,
     N_ITEM_COMPLETED,
@@ -133,6 +135,8 @@ def test_pinned_contract_matches_the_fixture():
     assert set(CONTRACT["server_notifications"]) == set(SERVER_NOTIFICATIONS)
     assert tuple(CONTRACT["forbidden_methods"]) == FORBIDDEN_METHODS
     assert tuple(CONTRACT["launch_argv"]) == LAUNCH_ARGV
+    assert CONTRACT["mcp_env_override"] == MCP_ENV_OVERRIDE
+    assert tuple(CONTRACT["mcp_env_keys"]) == MCP_ENV_KEYS
     assert CONTRACT["bridge_state_map"] == THREAD_STATUS_TO_STATE
     assert tuple(CONTRACT["min_codex_version"]) == MIN_CODEX_VERSION
     assert CONTRACT["codex_version"] == PINNED_CODEX_VERSION
