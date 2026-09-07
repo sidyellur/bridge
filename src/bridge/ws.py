@@ -74,14 +74,16 @@ def server_handshake(sock: socket.socket) -> dict[str, str]:
 
 
 def _read_headers(sock: socket.socket) -> tuple[str, dict[str, str]]:
-    data = b""
-    while b"\r\n\r\n" not in data:
-        chunk = sock.recv(4096)
+    # One byte at a time so the socket is left positioned exactly after the
+    # terminator — a bulk recv() would swallow bytes belonging to the first
+    # frame the peer pipelined right after the handshake.
+    data = bytearray()
+    while not data.endswith(b"\r\n\r\n"):
+        chunk = sock.recv(1)
         if not chunk:
             break
         data += chunk
-    head = data.split(b"\r\n\r\n", 1)[0]
-    lines = head.decode("utf-8", errors="replace").split("\r\n")
+    lines = bytes(data).decode("utf-8", errors="replace").split("\r\n")
     first_line = lines[0]
     headers: dict[str, str] = {}
     for line in lines[1:]:
@@ -126,6 +128,8 @@ def send_frame(
 
 
 def send_text(sock: socket.socket, payload: bytes, *, mask: bool) -> None:
+    """One text frame carrying exactly `payload` — never appends a newline and
+    never coalesces or splits messages; a frame is one message at this layer."""
     send_frame(sock, OP_TEXT, payload, mask=mask)
 
 
@@ -193,6 +197,8 @@ def recv_message(sock: socket.socket, *, require_mask: bool = False) -> bytes | 
                 raise WebSocketError("continuation frame with no preceding start frame")
             buffer.extend(payload)
         else:
+            if message_opcode is not None:
+                raise WebSocketError("data frame while a fragmented message is in progress")
             message_opcode = opcode
             buffer = bytearray(payload)
 

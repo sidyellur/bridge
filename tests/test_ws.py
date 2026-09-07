@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import socket
 import struct
 import threading
@@ -43,6 +44,16 @@ def _server_thread(sock: socket.socket):
 
 def _apply_mask(data: bytes, key: bytes) -> bytes:
     return bytes(b ^ key[i % 4] for i, b in enumerate(data))
+
+
+def _recv_exact_raw(sock: socket.socket, n: int) -> bytes:
+    data = b""
+    while len(data) < n:
+        chunk = sock.recv(n - len(data))
+        if not chunk:
+            raise AssertionError("unexpected EOF while reading a test frame")
+        data += chunk
+    return data
 
 
 def _read_raw_frame(sock: socket.socket) -> tuple[int, bool, bool, bytes]:
@@ -127,8 +138,10 @@ def test_server_handshake_without_a_key_raises_and_writes_nothing():
 def test_client_handshake_rejects_a_non_101_status():
     client, server = socket.socketpair()
     try:
+        captured: dict = {}
+
         def respond() -> None:
-            server.recv(4096)
+            captured["request"] = server.recv(4096)
             server.sendall(b"HTTP/1.1 404 Not Found\r\n\r\n")
 
         thread = threading.Thread(target=respond)
@@ -136,6 +149,20 @@ def test_client_handshake_rejects_a_non_101_status():
         with pytest.raises(WebSocketError, match="websocket handshake failed"):
             client_handshake(client)
         thread.join(timeout=5)
+
+        match = re.search(rb"Sec-WebSocket-Key: (\S+)\r\n", captured["request"])
+        assert match is not None
+        key = match.group(1).decode()
+        expected = (
+            f"GET / HTTP/1.1\r\n"
+            f"Host: localhost\r\n"
+            f"Upgrade: websocket\r\n"
+            f"Connection: Upgrade\r\n"
+            f"Sec-WebSocket-Key: {key}\r\n"
+            f"Sec-WebSocket-Version: 13\r\n"
+            f"\r\n"
+        ).encode()
+        assert captured["request"] == expected
     finally:
         client.close()
         server.close()
@@ -159,6 +186,64 @@ def test_client_handshake_rejects_a_wrong_accept_digest():
         with pytest.raises(WebSocketError, match="bad Sec-WebSocket-Accept"):
             client_handshake(client)
         thread.join(timeout=5)
+    finally:
+        client.close()
+        server.close()
+
+
+def test_client_handshake_does_not_consume_bytes_past_the_header_terminator():
+    client, server = socket.socketpair()
+    try:
+        def respond() -> None:
+            request = server.recv(4096)
+            match = re.search(rb"Sec-WebSocket-Key: (\S+)\r\n", request)
+            key = match.group(1).decode()
+            response = (
+                f"HTTP/1.1 101 Switching Protocols\r\n"
+                f"connection: Upgrade\r\n"
+                f"upgrade: websocket\r\n"
+                f"sec-websocket-accept: {accept_key(key)}\r\n"
+                f"\r\n"
+            ).encode()
+            frame = bytes([0x81, 0x05]) + b"hello"
+            server.sendall(response + frame)
+
+        thread = threading.Thread(target=respond)
+        thread.start()
+        client_handshake(client)
+        thread.join(timeout=5)
+
+        assert recv_message(client) == b"hello"
+    finally:
+        client.close()
+        server.close()
+
+
+def test_server_handshake_does_not_consume_bytes_past_the_header_terminator():
+    client, server = socket.socketpair()
+    try:
+        key = "dGhlIHNhbXBsZSBub25jZQ=="
+        request = (
+            f"GET / HTTP/1.1\r\n"
+            f"Host: localhost\r\n"
+            f"Upgrade: websocket\r\n"
+            f"Connection: Upgrade\r\n"
+            f"Sec-WebSocket-Key: {key}\r\n"
+            f"Sec-WebSocket-Version: 13\r\n"
+            f"\r\n"
+        ).encode()
+
+        frame_payload = b"pipelined"
+        mask_key = b"\x01\x02\x03\x04"
+        masked_payload = _apply_mask(frame_payload, mask_key)
+        frame = bytes([0x81, 0x80 | len(frame_payload)]) + mask_key + masked_payload
+
+        client.sendall(request + frame)
+
+        headers = server_handshake(server)
+        assert headers["sec-websocket-key"] == key
+
+        assert recv_message(server, require_mask=True) == frame_payload
     finally:
         client.close()
         server.close()
@@ -212,6 +297,39 @@ def test_round_trip_across_all_three_length_forms(size: int):
         server.close()
 
 
+def test_length_forms_encode_the_correct_field_width():
+    client, server = socket.socketpair()
+    try:
+        payload_200 = b"x" * 200
+        send_frame(client, OP_TEXT, payload_200, mask=True)
+        header = _recv_exact_raw(server, 2)
+        assert header[1] & 0x7F == 126
+        (length,) = struct.unpack("!H", _recv_exact_raw(server, 2))
+        assert length == 200
+        mask_key = _recv_exact_raw(server, 4)
+        payload = _recv_exact_raw(server, 200)
+        assert _apply_mask(payload, mask_key) == payload_200
+
+        payload_big = b"y" * 70_000
+
+        def send_big() -> None:
+            send_frame(client, OP_TEXT, payload_big, mask=True)
+
+        thread = threading.Thread(target=send_big)
+        thread.start()
+        header = _recv_exact_raw(server, 2)
+        assert header[1] & 0x7F == 127
+        (length,) = struct.unpack("!Q", _recv_exact_raw(server, 8))
+        assert length == 70_000
+        mask_key = _recv_exact_raw(server, 4)
+        payload = _recv_exact_raw(server, 70_000)
+        thread.join(timeout=5)
+        assert _apply_mask(payload, mask_key) == payload_big
+    finally:
+        client.close()
+        server.close()
+
+
 def test_utf8_payload_round_trips():
     text = "café 日本"  # "é" and "日"
     payload = text.encode("utf-8")
@@ -233,6 +351,20 @@ def test_continuation_frames_are_reassembled():
         send_frame(client, OP_CONT, b"cruel ", mask=True, fin=False)
         send_frame(client, OP_CONT, b"world", mask=True, fin=True)
         assert recv_message(server, require_mask=True) == b"hello cruel world"
+    finally:
+        client.close()
+        server.close()
+
+
+def test_data_frame_during_fragmented_message_is_rejected():
+    client, server = socket.socketpair()
+    try:
+        send_frame(client, OP_TEXT, b"start", mask=True, fin=False)
+        send_frame(client, OP_TEXT, b"newmsg", mask=True, fin=True)
+        with pytest.raises(
+            WebSocketError, match="data frame while a fragmented message is in progress"
+        ):
+            recv_message(server, require_mask=True)
     finally:
         client.close()
         server.close()
