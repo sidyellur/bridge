@@ -3,17 +3,19 @@
 Real ``codex`` is invoked two different ways by the wrapper:
 
 - ``codex app-server --listen unix://PATH`` — Bridge's managed App Server.
-  This fake binds ``PATH`` as a real Unix socket and serves the same minimal
-  initialize/thread/turn contract as ``tests/fakes/codex_app_server.py``
-  (inlined here, not imported, since this runs as its own subprocess) until it
-  receives SIGTERM, then exits cleanly.
+  This fake binds ``PATH`` as a real Unix socket and then hands the accepted
+  connection to ``tests.fakes.codex_app_server.FakeCodexAppServer`` until it
+  receives SIGTERM, then exits cleanly. It is still a genuine subprocess, but
+  it no longer re-implements the protocol (or RFC 6455) a second time inside
+  a string template — it imports the one fake the rest of the suite uses.
 - ``codex --remote unix://PATH ...`` — the TUI. This fake captures argv/env
   like ``tests/fakes/executables.py::make_capture_exe``, then blocks until a
   release file appears (so tests can observe "the TUI is running" before
   letting it exit) and exits with a configurable code.
 
-Written as a real file (mode 0755) so it runs as a genuine subprocess; it must
-not import anything from the ``bridge`` or ``tests`` packages at runtime.
+Written as a real file (mode 0755) so it runs as a genuine subprocess. The
+App Server half puts the repo on ``sys.path`` and imports the shared fake;
+the TUI half stays dependency-free.
 """
 
 from __future__ import annotations
@@ -28,7 +30,8 @@ import socket
 import sys
 import time
 
-PROTOCOL_VERSION = {protocol_version!r}
+CODEX_VERSION = {codex_version!r}
+REPO_PATHS = {repo_paths!r}
 THREAD_ID = "thread-fake"
 AGENT_MESSAGE = {agent_message!r}
 AUTO_COMPLETE = {auto_complete!r}
@@ -77,95 +80,20 @@ def _app_server(argv):
             break
 
     if conn is not None:
-        conn.settimeout(0.2)
-        buf = b""
-        turn_n = 0
+        sys.path[:0] = REPO_PATHS
+        from tests.fakes.codex_app_server import FakeCodexAppServer
 
-        def send(obj):
-            try:
-                conn.sendall((json.dumps(obj) + "\\n").encode("utf-8"))
-            except OSError:
-                pass
-
+        fake = FakeCodexAppServer(
+            conn,
+            codex_version=CODEX_VERSION,
+            thread_id=THREAD_ID,
+            cwd=os.getcwd(),
+            agent_message=AGENT_MESSAGE,
+            auto_complete=AUTO_COMPLETE,
+        )
         while not stop["flag"]:
-            try:
-                chunk = conn.recv(65536)
-            except TimeoutError:
-                continue
-            except OSError:
-                break
-            if not chunk:
-                break
-            buf += chunk
-            while b"\\n" in buf:
-                line, _, buf = buf.partition(b"\\n")
-                line = line.strip()
-                if not line:
-                    continue
-                msg = json.loads(line)
-                method = msg.get("method")
-                if method == "initialize":
-                    send(
-                        {{
-                            "jsonrpc": "2.0",
-                            "id": msg["id"],
-                            "result": {{
-                                "protocolVersion": PROTOCOL_VERSION,
-                                "serverInfo": {{"name": "fake-codex-exe", "version": "0"}},
-                                "capabilities": {{}},
-                            }},
-                        }}
-                    )
-                elif method == "initialized":
-                    send(
-                        {{
-                            "jsonrpc": "2.0",
-                            "method": "thread/started",
-                            "params": {{"thread_id": THREAD_ID}},
-                        }}
-                    )
-                    send(
-                        {{
-                            "jsonrpc": "2.0",
-                            "method": "runtime/status",
-                            "params": {{"status": "idle"}},
-                        }}
-                    )
-                elif method == "turn/start":
-                    turn_n += 1
-                    turn_id = f"turn-{{turn_n}}"
-                    send(
-                        {{
-                            "jsonrpc": "2.0",
-                            "method": "turn/started",
-                            "params": {{"turn_id": turn_id, "thread_id": THREAD_ID}},
-                        }}
-                    )
-                    if AUTO_COMPLETE:
-                        if AGENT_MESSAGE:
-                            send(
-                                {{
-                                    "jsonrpc": "2.0",
-                                    "method": "item/agent_message",
-                                    "params": {{"turn_id": turn_id, "text": AGENT_MESSAGE}},
-                                }}
-                            )
-                        send(
-                            {{
-                                "jsonrpc": "2.0",
-                                "method": "turn/completed",
-                                "params": {{"turn_id": turn_id, "thread_id": THREAD_ID}},
-                            }}
-                        )
-                    send({{"jsonrpc": "2.0", "id": msg["id"], "result": {{"turn_id": turn_id}}}})
-                elif method == "turn/steer":
-                    # Forbidden in v1; answer so a caller does not hang, but
-                    # the real assertion lives in the adapter's own tests.
-                    send({{"jsonrpc": "2.0", "id": msg["id"], "result": {{}}}})
-        try:
-            conn.close()
-        except OSError:
-            pass
+            time.sleep(0.05)
+        fake.close()
     try:
         srv.close()
     except OSError:
@@ -213,6 +141,9 @@ if __name__ == "__main__":
     main()
 """
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_PATHS = [str(REPO_ROOT), str(REPO_ROOT / "src")]
+
 DEFAULT_WATCH_KEYS = [
     "BRIDGE_SESSION_ID",
     "BRIDGE_ROUTER_SOCKET",
@@ -230,15 +161,15 @@ def make_fake_codex_exe(
     agent_message: str = "",
     auto_complete: bool = True,
     watch_keys: list[str] | None = None,
-    protocol_version: str = "codex-app-server/1",
+    codex_version: str = "0.151.0",
 ) -> Path:
     """Write a dual-mode fake ``codex`` executable to ``directory/codex``.
 
-    ``app-server --listen unix://PATH`` binds a real socket and serves the
-    pinned protocol until SIGTERM; any other invocation is treated as the TUI,
-    which captures its argv/env to ``capture`` and blocks on ``release_file``
-    (if given) before exiting with ``tui_exit_code``. ``protocol_version`` lets
-    a test simulate an unsupported/drifted App Server.
+    ``app-server --listen unix://PATH`` binds a real socket and serves
+    ``FakeCodexAppServer`` on it until SIGTERM; any other invocation is treated
+    as the TUI, which captures argv/env to ``capture`` and blocks on ``release_file``
+    (if given) before exiting with ``tui_exit_code``. ``codex_version`` lets a
+    test simulate an App Server too old for the pinned contract.
     """
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / "codex"
@@ -250,7 +181,8 @@ def make_fake_codex_exe(
         release_file=str(release_file) if release_file is not None else None,
         tui_exit_code=tui_exit_code,
         watch_keys=watch_keys or DEFAULT_WATCH_KEYS,
-        protocol_version=protocol_version,
+        codex_version=codex_version,
+        repo_paths=REPO_PATHS,
     )
     path.write_text(script, encoding="utf-8")
     path.chmod(0o755)

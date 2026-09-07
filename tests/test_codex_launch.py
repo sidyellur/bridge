@@ -305,12 +305,12 @@ def test_unsupported_app_server_version_stops_app_server_and_spawns_no_tui(paths
         bindir,
         capture=capture,
         release_file=release,
-        protocol_version="codex-app-server/999",
+        codex_version="0.150.0",
     )
 
     with RunningRouter(paths) as rr:
         env = {"PATH": str(bindir), "BRIDGE_CODEX_BIN": str(bindir / "codex")}
-        with pytest.raises(Exception, match="codex-app-server/999"):
+        with pytest.raises(Exception, match="predates the pinned App Server contract"):
             run_wrapper(
                 "codex",
                 [],

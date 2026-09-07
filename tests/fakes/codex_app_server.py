@@ -7,8 +7,9 @@ on every notification, ``thread/started``/``thread/status/changed`` broadcast to
 everyone while ``turn/*``/``item/*`` reach subscribers only, and
 ``thread/resume`` as the (frequently broken) subscribe verb. No real model.
 
-``LegacyFakeCodexAppServer`` is the pre-contract fake, kept only until the
-client is rewritten against the real protocol.
+Every wire name comes from :mod:`bridge.codex_app_server` — the client module
+is the single source of truth, and ``test_codex_client`` pins both it and this
+fake against ``tests/fixtures/codex_protocol/codex-0.151.0.json``.
 """
 
 from __future__ import annotations
@@ -17,29 +18,29 @@ import threading
 import time
 from collections.abc import Callable
 
-from bridge.mcp import Framing, JsonRpcError, RpcEndpoint
+from bridge.codex_app_server import (
+    FORBIDDEN_METHODS,
+    ITEM_AGENT_MESSAGE,
+    M_INITIALIZE,
+    M_THREAD_LIST,
+    M_THREAD_READ,
+    M_THREAD_RESUME,
+    M_THREAD_UNSUBSCRIBE,
+    M_TURN_START,
+    N_INITIALIZED,
+    N_ITEM_COMPLETED,
+    N_ITEM_DELTA,
+    N_ITEM_STARTED,
+    N_THREAD_STARTED,
+    N_THREAD_STATUS,
+    N_TURN_COMPLETED,
+    N_TURN_STARTED,
+    PINNED_CODEX_VERSION,
+    THREAD_STATUS_ACTIVE,
+    THREAD_STATUS_IDLE,
+)
+from bridge.mcp import INVALID_REQUEST, METHOD_NOT_FOUND, Framing, JsonRpcError, RpcEndpoint
 
-M_INITIALIZE = "initialize"
-M_THREAD_LOADED_LIST = "thread/loaded/list"
-M_THREAD_READ = "thread/read"
-M_THREAD_RESUME = "thread/resume"
-M_THREAD_UNSUBSCRIBE = "thread/unsubscribe"
-M_TURN_START = "turn/start"
-
-CN_INITIALIZED = "initialized"
-
-N_THREAD_STARTED = "thread/started"
-N_THREAD_STATUS_CHANGED = "thread/status/changed"
-N_TURN_STARTED = "turn/started"
-N_TURN_COMPLETED = "turn/completed"
-N_ITEM_STARTED = "item/started"
-N_ITEM_AGENT_MESSAGE_DELTA = "item/agentMessage/delta"
-N_ITEM_COMPLETED = "item/completed"
-
-_FORBIDDEN = ("turn/steer", "turn/interrupt", "review/start")
-
-_INVALID_REQUEST = -32600
-_METHOD_NOT_FOUND = -32601
 _LIST_TURNS_UNSUPPORTED = "list_turns is not supported yet"
 _NO_ROLLOUT = "no rollout found for thread id {thread_id}"
 
@@ -49,7 +50,7 @@ class FakeCodexAppServer:
         self,
         sock,
         *,
-        codex_version: str = "0.151.0",
+        codex_version: str = PINNED_CODEX_VERSION,
         thread_id: str = "thread-abc",
         cwd: str = "/tmp/peer",
         agent_message: str = "",
@@ -88,13 +89,13 @@ class FakeCodexAppServer:
             on_close=self._on_close,
         )
         self.rpc.method(M_INITIALIZE, self._initialize)
-        self.rpc.notification(CN_INITIALIZED, self._on_initialized)
-        self.rpc.method(M_THREAD_LOADED_LIST, self._thread_loaded_list)
+        self.rpc.notification(N_INITIALIZED, self._on_initialized)
+        self.rpc.method(M_THREAD_LIST, self._thread_loaded_list)
         self.rpc.method(M_THREAD_READ, self._thread_read)
         self.rpc.method(M_THREAD_RESUME, self._thread_resume)
         self.rpc.method(M_THREAD_UNSUBSCRIBE, self._thread_unsubscribe)
         self.rpc.method(M_TURN_START, self._turn_start)
-        for method in _FORBIDDEN:
+        for method in FORBIDDEN_METHODS:
             self.rpc.method(method, lambda params, m=method: self._forbidden(m, params))
         self.rpc.start()
 
@@ -109,7 +110,7 @@ class FakeCodexAppServer:
     # --- initialize ---------------------------------------------------------
     def _initialize(self, params: dict) -> dict:
         if self.initialize_params is not None:
-            raise JsonRpcError(_INVALID_REQUEST, "Already initialized")
+            raise JsonRpcError(INVALID_REQUEST, "Already initialized")
         self.initialize_params = params
         client = (params.get("clientInfo") or {}).get("name", "client")
         version = (params.get("clientInfo") or {}).get("version", "0.1.0")
@@ -125,7 +126,7 @@ class FakeCodexAppServer:
 
     def _require_initialized(self) -> None:
         if self.initialize_params is None:
-            raise JsonRpcError(_INVALID_REQUEST, "Not initialized")
+            raise JsonRpcError(INVALID_REQUEST, "Not initialized")
 
     def _on_initialized(self, _params: dict) -> None:
         if self.eager_thread:
@@ -152,11 +153,13 @@ class FakeCodexAppServer:
         }
 
     def start_thread(self, thread_id: str, cwd: str) -> dict:
-        thread = self._thread_obj(thread_id, cwd, {"type": "idle"})
+        thread = self._thread_obj(thread_id, cwd, {"type": THREAD_STATUS_IDLE})
         with self._lock:
             self.threads.append(thread)
         self._notify(N_THREAD_STARTED, {"thread": thread})
-        self._notify(N_THREAD_STATUS_CHANGED, {"threadId": thread_id, "status": {"type": "idle"}})
+        self._notify(
+            N_THREAD_STATUS, {"threadId": thread_id, "status": {"type": THREAD_STATUS_IDLE}}
+        )
         return thread
 
     def _find_thread(self, thread_id: str) -> dict:
@@ -166,7 +169,7 @@ class FakeCodexAppServer:
                     return thread
         # Unprobed guess: the live server's error for an unknown thread/read id
         # was never recorded, so this reuses thread/resume's message.
-        raise JsonRpcError(_INVALID_REQUEST, _NO_ROLLOUT.format(thread_id=thread_id))
+        raise JsonRpcError(INVALID_REQUEST, _NO_ROLLOUT.format(thread_id=thread_id))
 
     def _thread_loaded_list(self, _params: dict) -> dict:
         self._require_initialized()
@@ -176,7 +179,7 @@ class FakeCodexAppServer:
     def _thread_read(self, params: dict) -> dict:
         self._require_initialized()
         if params.get("includeTurns"):
-            raise JsonRpcError(_METHOD_NOT_FOUND, _LIST_TURNS_UNSUPPORTED)
+            raise JsonRpcError(METHOD_NOT_FOUND, _LIST_TURNS_UNSUPPORTED)
         return {"thread": self._find_thread(params["threadId"])}
 
     def _thread_resume(self, params: dict) -> dict:
@@ -186,9 +189,9 @@ class FakeCodexAppServer:
         # connection subscribed after the excludeTurns error, but that is a bug
         # (report §3), not contract Bridge may lean on.
         if self.resume_result == "unsupported":
-            raise JsonRpcError(_METHOD_NOT_FOUND, _LIST_TURNS_UNSUPPORTED)
+            raise JsonRpcError(METHOD_NOT_FOUND, _LIST_TURNS_UNSUPPORTED)
         if self.resume_result == "no_rollout":
-            raise JsonRpcError(_INVALID_REQUEST, _NO_ROLLOUT.format(thread_id=thread_id))
+            raise JsonRpcError(INVALID_REQUEST, _NO_ROLLOUT.format(thread_id=thread_id))
         thread = self._find_thread(thread_id)
         self.subscribed.add(thread_id)
         return {"thread": thread}
@@ -222,7 +225,7 @@ class FakeCodexAppServer:
             turn_id = f"turn-{self._turn_n}"
             self._last_turn_id = turn_id
 
-        self.emit_status("active", [])
+        self.emit_status(THREAD_STATUS_ACTIVE, [])
         self._notify_subscribed(
             N_TURN_STARTED,
             {"threadId": thread_id, "turn": self._turn_obj(turn_id, "inProgress")},
@@ -269,7 +272,7 @@ class FakeCodexAppServer:
             {
                 "threadId": self.thread_id,
                 "turnId": turn_id,
-                "item": {"type": "agentMessage", "id": item_id, "text": ""},
+                "item": {"type": ITEM_AGENT_MESSAGE, "id": item_id, "text": ""},
                 "startedAtMs": self._now_ms(),
             },
         )
@@ -278,7 +281,7 @@ class FakeCodexAppServer:
             for i, word in enumerate(words):
                 delta = word if i == len(words) - 1 else word + " "
                 self._notify_subscribed(
-                    N_ITEM_AGENT_MESSAGE_DELTA,
+                    N_ITEM_DELTA,
                     {
                         "threadId": self.thread_id,
                         "turnId": turn_id,
@@ -292,7 +295,7 @@ class FakeCodexAppServer:
                 "threadId": self.thread_id,
                 "turnId": turn_id,
                 "item": {
-                    "type": "agentMessage",
+                    "type": ITEM_AGENT_MESSAGE,
                     "id": item_id,
                     "text": message,
                     "phase": "final",
@@ -302,7 +305,7 @@ class FakeCodexAppServer:
                 "completedAtMs": self._now_ms(),
             },
         )
-        self.emit_status("idle")
+        self.emit_status(THREAD_STATUS_IDLE)
         self._notify_subscribed(
             N_TURN_COMPLETED,
             {"threadId": self.thread_id, "turn": self._turn_obj(turn_id, status)},
@@ -312,7 +315,7 @@ class FakeCodexAppServer:
         status: dict = {"type": type_}
         if active_flags is not None:
             status["activeFlags"] = active_flags
-        self._notify(N_THREAD_STATUS_CHANGED, {"threadId": self.thread_id, "status": status})
+        self._notify(N_THREAD_STATUS, {"threadId": self.thread_id, "status": status})
 
     # --- traps --------------------------------------------------------------
     def _forbidden(self, method: str, params: dict) -> dict:
@@ -329,70 +332,6 @@ class FakeCodexAppServer:
         # An unmasked client frame tears the reader down; the real server then
         # closes the socket with no close frame.
         self.rpc.close()
-
-    def close(self) -> None:
-        self.rpc.close()
-
-
-class LegacyFakeCodexAppServer:
-    def __init__(
-        self,
-        sock,
-        *,
-        version: str = "codex-app-server/1",
-        thread_id: str = "thread-abc",
-        agent_message: str = "",
-        auto_complete: bool = True,
-    ) -> None:
-        self.rpc = RpcEndpoint(sock, name="fake-codex-app-server")
-        self.version = version
-        self.thread_id = thread_id
-        self.agent_message = agent_message
-        self.auto_complete = auto_complete
-        self.turns: list[dict] = []
-        self.forbidden_calls: list[dict] = []
-        self._turn_n = 0
-        self._last_turn_id: str | None = None
-        self.rpc.method("initialize", self._initialize)
-        self.rpc.notification("initialized", self._on_initialized)
-        self.rpc.method("turn/start", self._turn_start)
-        self.rpc.method("turn/steer", self._forbidden)
-        self.rpc.start()
-
-    def _initialize(self, _params: dict) -> dict:
-        return {
-            "protocolVersion": self.version,
-            "serverInfo": {"name": "fake-codex", "version": "0"},
-            "capabilities": {},
-        }
-
-    def _on_initialized(self, _params: dict) -> None:
-        self.rpc.notify("thread/started", {"thread_id": self.thread_id})
-        self.rpc.notify("runtime/status", {"status": "idle"})
-
-    def _turn_start(self, params: dict) -> dict:
-        self._turn_n += 1
-        turn_id = f"turn-{self._turn_n}"
-        self._last_turn_id = turn_id
-        self.turns.append(params)
-        self.rpc.notify("turn/started", {"turn_id": turn_id, "thread_id": self.thread_id})
-        if self.auto_complete:
-            self.complete_turn(turn_id)
-        return {"turn_id": turn_id}
-
-    def complete_turn(self, turn_id: str | None = None, agent_message: str | None = None) -> None:
-        turn_id = turn_id or self._last_turn_id or "turn-0"
-        message = self.agent_message if agent_message is None else agent_message
-        if message:
-            self.rpc.notify("item/agent_message", {"turn_id": turn_id, "text": message})
-        self.rpc.notify("turn/completed", {"turn_id": turn_id, "thread_id": self.thread_id})
-
-    def _forbidden(self, params: dict) -> dict:
-        self.forbidden_calls.append(params)
-        return {}
-
-    def emit_status(self, status: str) -> None:
-        self.rpc.notify("runtime/status", {"status": status})
 
     def close(self) -> None:
         self.rpc.close()

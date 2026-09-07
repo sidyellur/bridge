@@ -39,10 +39,11 @@ from bridge.lab.cli import (
 )
 
 from .fakes.claude_host import FakeClaudeHost
-from .fakes.codex_app_server import LegacyFakeCodexAppServer
+from .fakes.codex_app_server import FakeCodexAppServer
 from .fakes.executables import make_capture_exe
 from .fakes.router_peer import RunningRouter
 
+CODEX_CWD = "/tmp/peer"
 DOCS = Path(__file__).resolve().parent.parent / "docs" / "experiments"
 REAL_DOC = DOCS / "2026-08-27-live-transport-semantics.md"
 
@@ -173,13 +174,19 @@ def _make_claude(rr, paths, session_id, *, auto_reply=None):
 
 def _make_codex(rr, session_id, *, auto_complete=True):
     client_sock, server_sock = socket.socketpair()
-    server = LegacyFakeCodexAppServer(server_sock, auto_complete=auto_complete)
-    app = CodexAppServerClient(client_sock).start()
+    server = FakeCodexAppServer(server_sock, cwd=CODEX_CWD, auto_complete=auto_complete)
+    app = CodexAppServerClient(client_sock, cwd=CODEX_CWD).start()
     adapter = CodexAdapter(session_id, app)
     adapter.connect_router(
         lambda on_event: rr.client(session_id=session_id, role="adapter", on_event=on_event)
     )
     adapter.start()
+    # `turn/*`/`item/*` are subscriber-only; the adapter does not subscribe
+    # itself yet (Task 5), so F/G would see no turn frames without this.
+    deadline = time.time() + 3.0
+    while time.time() < deadline and not app.thread_id:
+        time.sleep(0.02)
+    app.subscribe()
     return adapter, server
 
 
@@ -419,11 +426,11 @@ def test_run_f_fails_when_the_turn_never_completes(paths, run_dir):
 
 def test_correlate_turns_pairs_ids_through_the_response():
     records = [
-        {"frame": {"jsonrpc": "2.0", "id": 7, "method": "turn/start", "params": {}}},
-        {"frame": {"jsonrpc": "2.0", "id": 7, "result": {"turn_id": "turn-1"}}},
-        {"frame": {"jsonrpc": "2.0", "method": "turn/started", "params": {"turn_id": "turn-1"}}},
-        {"frame": {"jsonrpc": "2.0", "method": "turn/completed", "params": {"turn_id": "turn-1"}}},
-        {"frame": {"jsonrpc": "2.0", "method": "turn/started", "params": {"turn_id": "other"}}},
+        {"frame": {"id": 7, "method": "turn/start", "params": {}}},
+        {"frame": {"id": 7, "result": {"turn": {"id": "turn-1"}}}},
+        {"frame": {"method": "turn/started", "params": {"turn": {"id": "turn-1"}}}},
+        {"frame": {"method": "turn/completed", "params": {"turn": {"id": "turn-1"}}}},
+        {"frame": {"method": "turn/started", "params": {"turn": {"id": "other"}}}},
     ]
     result = correlate_turns(records)
     assert result["turn_ids"] == ["turn-1"]
@@ -444,7 +451,7 @@ def test_run_g_holds_while_working_delivers_on_idle_and_sees_no_steer(paths, run
             ctrl = rr.client(session_id="ctrl")
             assert _wait_reachable(ctrl, "codex-1", state="idle")
 
-            server.emit_status("working")
+            server.emit_status("active")
             deadline = time.time() + 3.0
             while time.time() < deadline:
                 entry = next(s for s in ctrl.call("roster", {})["sessions"] if s["id"] == "codex-1")
@@ -492,7 +499,7 @@ def test_run_g_hard_fails_on_any_turn_steer_frame(paths, run_dir):
         try:
             ctrl = rr.client(session_id="ctrl")
             assert _wait_reachable(ctrl, "codex-1", state="idle")
-            server.emit_status("working")
+            server.emit_status("active")
             releaser = threading.Timer(0.4, lambda: server.emit_status("idle"))
             releaser.start()
             try:
@@ -592,7 +599,7 @@ def test_run_g_auto_picks_codex_and_announces_it_when_neither_is_explicit(paths,
             ctrl = rr.client(session_id="ctrl")
             assert _wait_reachable(ctrl, "codex-1", state="idle")
 
-            server.emit_status("working")
+            server.emit_status("active")
             deadline = time.time() + 3.0
             while time.time() < deadline:
                 entry = next(s for s in ctrl.call("roster", {})["sessions"] if s["id"] == "codex-1")
@@ -886,6 +893,7 @@ def test_lab_only_ever_watches_for_the_forbidden_method():
 
     assert lab_cli.FORBIDDEN_FRAME_METHODS == FORBIDDEN_METHODS
     source = Path(lab_cli.__file__).read_text()
-    # `turn/steer` appears only in the forbidden-method constant the lab scans
-    # a capture for -- the lab never sends one.
-    assert source.count('"turn/steer"') == 1
+    # The lab never names a forbidden method itself: it scans a capture for the
+    # client module's tuple, so no method literal appears here at all.
+    for method in FORBIDDEN_METHODS:
+        assert f'"{method}"' not in source

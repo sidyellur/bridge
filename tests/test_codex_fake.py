@@ -459,4 +459,4 @@ def test_fake_only_speaks_methods_and_notifications_that_are_in_the_fixture(fake
     assert set(fake.rpc._methods) <= allowed_requests
     assert set(fake.rpc._notifications) <= set(CONTRACT["client_notifications"])
     assert emitted <= set(CONTRACT["server_notifications"])
-    assert set(fake_module._FORBIDDEN) == set(CONTRACT["forbidden_methods"])
+    assert set(fake_module.FORBIDDEN_METHODS) == set(CONTRACT["forbidden_methods"])

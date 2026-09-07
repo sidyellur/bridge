@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Any
 
 from .. import __version__
+from ..codex_app_server import FORBIDDEN_METHODS
 from ..paths import Paths
 from .capture import (
     CAPTURE_ENV,
@@ -55,7 +56,7 @@ LAB_SESSION_ID = "bridge-lab"
 
 #: Never issued, never expected. Seeing one in a capture fails Experiment G
 #: outright, whatever else happened.
-FORBIDDEN_FRAME_METHODS = ("turn/steer",)
+FORBIDDEN_FRAME_METHODS = FORBIDDEN_METHODS
 
 CHANNEL_NOTIFICATION = "notifications/claude/channel"
 
@@ -421,6 +422,12 @@ def _steer_frames(ctx: LabContext) -> list[dict[str, Any]]:
     return [r for r in ctx.tail.all_records() if frame_method(r) in FORBIDDEN_FRAME_METHODS]
 
 
+def _turn_id(container: Mapping[str, Any]) -> Any:
+    """The turn id lives at ``turn.id`` everywhere in the real contract."""
+    turn = container.get("turn")
+    return turn.get("id") if isinstance(turn, Mapping) else None
+
+
 def correlate_turns(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     """Pair ``turn/start`` requests with their ``turn/started`` /
     ``turn/completed`` notifications through the returned ``turn_id``."""
@@ -435,11 +442,11 @@ def correlate_turns(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         if method == "turn/start" and "id" in frame:
             request_ids.add(frame["id"])
         elif method == "turn/started":
-            turn_id = frame_params(rec).get("turn_id")
+            turn_id = _turn_id(frame_params(rec))
             if isinstance(turn_id, str):
                 started.add(turn_id)
         elif method == "turn/completed":
-            turn_id = frame_params(rec).get("turn_id")
+            turn_id = _turn_id(frame_params(rec))
             if isinstance(turn_id, str):
                 completed.add(turn_id)
 
@@ -452,7 +459,7 @@ def correlate_turns(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             continue
         result = frame.get("result")
         if isinstance(result, Mapping):
-            turn_id = result.get("turn_id")
+            turn_id = _turn_id(result)
             if isinstance(turn_id, str) and turn_id and turn_id not in turn_ids:
                 turn_ids.append(turn_id)
 
