@@ -17,6 +17,8 @@ from bridge.install import (
 
 from .fakes.router_peer import RunningRouter
 
+DEV_CHANNEL_ARGS = ["--dangerously-load-development-channels", "server:bridge"]
+
 # A hermetic default: PLUGIN/OK keeps `report.ok` true for tests that aren't
 # specifically exercising channel-mode detection, and never invokes a real
 # `claude` binary.
@@ -223,11 +225,15 @@ def test_channel_mode_ok_for_plugin(paths, fake_user_home):
 
 def test_channel_mode_warns_for_development(paths, fake_user_home):
     probe = lambda: ChannelMode(  # noqa: E731
-        ChannelSupport.DEVELOPMENT, "2.0.0", ["--channels", "dev:bridge"]
+        ChannelSupport.DEVELOPMENT, "2.0.0", DEV_CHANNEL_ARGS
     )
     _install(paths, fake_user_home, probe=probe)
     report = _doctor(paths, fake_user_home, probe=probe)
     assert _status(report, "Claude Channel mode") == WARN
+    assert _detail(report, "Claude Channel mode") == (
+        "research preview: --dangerously-load-development-channels server:bridge "
+        "(claude 2.0.0); organization policy may still block inbound delivery"
+    )
     assert report.ok  # WARN alone does not fail the overall report
 
 

@@ -52,12 +52,18 @@ finds, instead of assuming a fixed mode:
 - **`plugin`** — your `claude` advertises a channel marketplace/allowlist. The
   wrapper launches with `--channels plugin:bridge@<marketplace>`. This is the
   fully-supported path; `bridge doctor` reports it `[ok]`.
-- **`development`** — `claude` only exposes the Channels *research-preview*
-  development flag. The wrapper still launches with the channel enabled, but
-  `bridge doctor` reports it `[warn]`: your organization's policy may still
-  reject inbound events even though the flag is accepted locally.
-- **`unsupported`** — no channel support was detected at all (old `claude`
-  version, or the binary isn't found). Bridge writes no channel flag; the
+- **`development`** — Claude Code Channels are still a *research preview*, and
+  during the preview the channel flags are deliberately absent from
+  `claude --help` even though the binary accepts them. Bridge therefore
+  classifies this mode by version — `claude` 2.1.234 or newer — rather than by
+  grepping the help text. The wrapper launches with
+  `--dangerously-load-development-channels server:bridge` (`bridge` is the key
+  `bridge install` registers Bridge's MCP server under), and `claude` shows a
+  one-time confirmation for the development channel at startup. `bridge doctor`
+  reports it `[warn]`: your organization's policy may still reject inbound
+  events even though the flag is accepted locally.
+- **`unsupported`** — `claude` older than 2.1.234, an unparsable version, or
+  the binary isn't found. Bridge writes no channel flag; the
   session launches normally but is **inbound-unreachable** — `call`/`text`
   aimed at it return `unreachable`. Outbound Bridge tools from that session
   still work. `bridge doctor` reports this `[fail]` so it isn't missed.

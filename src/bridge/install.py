@@ -20,7 +20,13 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .claude_probe import ChannelMode, ChannelSupport, detect_channel_mode
+from .claude_probe import (
+    DEV_CHANNEL_SPEC,
+    DEV_CHANNELS_FLAG,
+    ChannelMode,
+    ChannelSupport,
+    detect_channel_mode,
+)
 from .launch import CLAUDE_CHANNEL_ARGS_FILE
 from .paths import Paths
 from .router import read_token
@@ -186,18 +192,17 @@ def install(
         )
     elif mode.support is ChannelSupport.DEVELOPMENT:
         report.notes.append(
-            "Claude Channel mode: development (research preview) "
-            f"(claude {mode.version or 'unknown'}); launching with the development "
-            "channel flag. Organization policy may still block inbound delivery; "
-            "run `bridge doctor` to check."
+            "Claude Channel mode: development (research preview, claude "
+            f"{mode.version or 'unknown'}): launching with {DEV_CHANNELS_FLAG} "
+            f"{DEV_CHANNEL_SPEC}. Claude asks once at startup to confirm the "
+            "development channel; organization policy may still block inbound "
+            "delivery (bridge doctor reports this as a warning)."
         )
     else:
-        detail = f" ({mode.detail})" if mode.detail else ""
+        detail = mode.detail or f"claude {mode.version or 'not found'}"
         report.notes.append(
-            "Claude channel unsupported"
-            f" (claude {mode.version or 'not found'}){detail}: this session will be "
-            "inbound-unreachable until Claude Code Channels are available. "
-            "Outbound Bridge tools still work."
+            f"Claude channel unsupported ({detail}): this session will be "
+            "inbound-unreachable. Outbound Bridge tools still work."
         )
     report.notes.append("no Claude prompt hooks installed")
     return report

@@ -21,6 +21,8 @@ from bridge.install import (
     uninstall,
 )
 
+DEV_CHANNEL_ARGS = ["--dangerously-load-development-channels", "server:bridge"]
+
 
 def _fake_probe(
     support: ChannelSupport = ChannelSupport.UNSUPPORTED,
@@ -117,12 +119,17 @@ def test_install_is_byte_identical_on_second_run(paths, fake_user_home):
 
 
 def test_install_writes_channel_args_for_development(paths, fake_user_home):
-    probe = _fake_probe(ChannelSupport.DEVELOPMENT, "2.0.0", ["--channels", "dev:bridge"])
+    probe = _fake_probe(ChannelSupport.DEVELOPMENT, "2.0.0", DEV_CHANNEL_ARGS)
     report = _install(paths, fake_user_home, probe=probe)
     args_file = paths.home / "claude_channel_args.json"
-    assert json.loads(args_file.read_text()) == ["--channels", "dev:bridge"]
+    assert json.loads(args_file.read_text()) == DEV_CHANNEL_ARGS
     assert report.channel_mode == "development"
-    assert any("research preview" in n.lower() for n in report.notes)
+    assert (
+        "Claude Channel mode: development (research preview, claude 2.0.0): launching with "
+        "--dangerously-load-development-channels server:bridge. Claude asks once at startup "
+        "to confirm the development channel; organization policy may still block inbound "
+        "delivery (bridge doctor reports this as a warning)."
+    ) in report.notes
 
 
 def test_install_writes_channel_args_for_plugin(paths, fake_user_home):
@@ -145,6 +152,21 @@ def test_install_writes_nothing_for_unsupported_channel(paths, fake_user_home):
     assert any("inbound-unreachable" in n for n in report.notes)
 
 
+def test_install_unsupported_note_quotes_the_probe_detail(paths, fake_user_home):
+    mode = ChannelMode(
+        ChannelSupport.UNSUPPORTED,
+        "2.1.233",
+        [],
+        "claude 2.1.233 predates Claude Code Channels (needs >= 2.1.234)",
+    )
+    report = _install(paths, fake_user_home, probe=lambda: mode)
+    assert (
+        "Claude channel unsupported (claude 2.1.233 predates Claude Code Channels "
+        "(needs >= 2.1.234)): this session will be inbound-unreachable. "
+        "Outbound Bridge tools still work."
+    ) in report.notes
+
+
 def test_install_channel_args_byte_identical_on_second_run(paths, fake_user_home):
     probe = _fake_probe(
         ChannelSupport.PLUGIN, "3.0.0", ["--channels", "plugin:bridge@bridge-marketplace"]
@@ -157,7 +179,7 @@ def test_install_channel_args_byte_identical_on_second_run(paths, fake_user_home
 
 
 def test_dry_run_does_not_write_channel_args(paths, fake_user_home):
-    probe = _fake_probe(ChannelSupport.DEVELOPMENT, "2.0.0", ["--channels", "dev:bridge"])
+    probe = _fake_probe(ChannelSupport.DEVELOPMENT, "2.0.0", DEV_CHANNEL_ARGS)
     report = _install(paths, fake_user_home, probe=probe, dry_run=True)
     assert not (paths.home / "claude_channel_args.json").exists()
     assert report.channel_mode == "development"

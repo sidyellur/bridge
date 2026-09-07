@@ -113,15 +113,15 @@ def describe_channel_mode(channel_args: Sequence[str]) -> str:
     ``bridge claude`` launch."""
     if not channel_args:
         return "Claude Channel mode: unsupported; this session is inbound-unreachable"
-    from .claude_probe import DEV_ARG_MARKER, PLUGIN_ARG_MARKER
+    from .claude_probe import DEV_CHANNEL_SPEC, DEV_CHANNELS_FLAG, PLUGIN_ARG_MARKER
 
     joined = " ".join(channel_args)
     if PLUGIN_ARG_MARKER in joined:
         return "Claude Channel mode: plugin"
-    if DEV_ARG_MARKER in joined:
+    if DEV_CHANNELS_FLAG in channel_args:
         return (
-            "Claude Channel mode: development (research preview; organization "
-            "policy may block inbound delivery)"
+            f"Claude Channel mode: development (research preview: {DEV_CHANNELS_FLAG} "
+            f"{DEV_CHANNEL_SPEC}; organization policy may block inbound delivery)"
         )
     return "Claude Channel mode: custom"
 

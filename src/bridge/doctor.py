@@ -18,7 +18,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import PROTOCOL_VERSION
-from .claude_probe import ChannelMode, ChannelSupport, detect_channel_mode
+from .claude_probe import (
+    DEV_CHANNEL_SPEC,
+    DEV_CHANNELS_FLAG,
+    ChannelMode,
+    ChannelSupport,
+    detect_channel_mode,
+)
 from .install import (
     claude_legacy_settings_path,
     claude_mcp_config_path,
@@ -240,8 +246,9 @@ def _channel_mode_check(probe: Callable[[], ChannelMode] | None) -> tuple[str, s
         return (
             "Claude Channel mode",
             WARN,
-            f"research preview: development channel flag (claude {mode.version or 'unknown'}); "
-            "organization policy may still block inbound delivery",
+            f"research preview: {DEV_CHANNELS_FLAG} {DEV_CHANNEL_SPEC} "
+            f"(claude {mode.version or 'unknown'}); organization policy may still "
+            "block inbound delivery",
         )
     detail = f"claude {mode.version or 'not found'}"
     if mode.detail:
