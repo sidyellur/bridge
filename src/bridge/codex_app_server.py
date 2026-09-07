@@ -41,7 +41,13 @@ from pathlib import Path
 from typing import Any
 
 from .mcp import INVALID_REQUEST, METHOD_NOT_FOUND, Framing, JsonRpcError, RpcEndpoint
-from .paths import BRIDGE_HOME_ENV, ROUTER_SOCKET_ENV, ROUTER_TOKEN_ENV, SESSION_ID_ENV
+from .paths import (
+    BRIDGE_HOME_ENV,
+    CODEX_MCP_SERVER_NAME,
+    ROUTER_SOCKET_ENV,
+    ROUTER_TOKEN_ENV,
+    SESSION_ID_ENV,
+)
 
 M_INITIALIZE = "initialize"
 M_THREAD_LIST = "thread/loaded/list"
@@ -109,12 +115,16 @@ def is_bindable_thread(thread: Mapping[str, Any]) -> bool:
 
     Excludes Codex's ephemeral ``threadSource=="system"`` side-threads (see
     the module docstring). Missing ``ephemeral``/``threadSource`` fields count
-    as bindable, for forward-compat with servers that predate them. Pure: safe
-    to call from a notification handler, which may never issue a request.
+    as bindable, for forward-compat with servers that predate them. The real
+    schema declares ``threadSource`` optional *and* nullable, so a thread
+    carrying ``"threadSource": null`` must also count as bindable -- ``.get``'s
+    default only covers the key being absent, not present-but-``None``, hence
+    the explicit ``or THREAD_SOURCE_USER`` fallback. Pure: safe to call from a
+    notification handler, which may never issue a request.
     """
     return (
         thread.get("ephemeral") is not True
-        and thread.get("threadSource", THREAD_SOURCE_USER) == THREAD_SOURCE_USER
+        and (thread.get("threadSource") or THREAD_SOURCE_USER) == THREAD_SOURCE_USER
     )
 
 
@@ -179,7 +189,9 @@ MCP_ENV_KEYS: tuple[str, ...] = (
 #: One ``-c`` override token, formatted with ``value`` already JSON-encoded
 #: (a JSON string is a valid TOML basic string, which is how Codex parses
 #: `-c key=value`). Mirrored verbatim as "mcp_env_override" in the fixture.
-MCP_ENV_OVERRIDE = "mcp_servers.bridge.env.{key}={value}"
+#: Targets the same ``[mcp_servers.<name>]`` table install.py registers Bridge
+#: under, so both are built off :data:`CODEX_MCP_SERVER_NAME`.
+MCP_ENV_OVERRIDE = f"mcp_servers.{CODEX_MCP_SERVER_NAME}.env.{{key}}={{value}}"
 
 
 def build_launch_argv(

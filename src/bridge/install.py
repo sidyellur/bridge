@@ -28,7 +28,7 @@ from .claude_probe import (
     detect_channel_mode,
 )
 from .launch import CLAUDE_CHANNEL_ARGS_FILE
-from .paths import Paths
+from .paths import CODEX_MCP_SERVER_NAME, Paths
 from .router import read_token
 
 MD_BEGIN = "<!-- BEGIN bridge coordination guidance (managed by `bridge install`) -->"
@@ -69,10 +69,23 @@ class InstallError(Exception):
 
 def codex_mcp_block(command: str) -> str:
     return (
-        "[mcp_servers.bridge]\n"
+        f"[mcp_servers.{CODEX_MCP_SERVER_NAME}]\n"
         f"command = {json.dumps(command)}\n"
         'args = ["serve", "--family", "codex"]\n'
     )
+
+
+def codex_mcp_server_registered(codex_home: Path) -> bool:
+    """Whether Codex's ``config.toml`` already registers Bridge's MCP server.
+
+    Shared by ``bridge doctor`` (reporting) and ``bridge codex`` (deciding
+    whether it is safe to pass ``-c mcp_servers.<name>.env.*`` overrides on
+    the App Server launch line -- passing them when the table is absent makes
+    the App Server refuse to boot)."""
+    path = codex_config_path(codex_home)
+    if not path.exists():
+        return False
+    return f"[mcp_servers.{CODEX_MCP_SERVER_NAME}]" in path.read_text()
 
 
 @dataclass

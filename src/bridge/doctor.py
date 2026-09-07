@@ -29,8 +29,9 @@ from .install import (
     claude_legacy_settings_path,
     claude_mcp_config_path,
     codex_config_path,
+    codex_mcp_server_registered,
 )
-from .paths import Paths
+from .paths import CODEX_MCP_SERVER_NAME, Paths
 
 OK = "ok"
 WARN = "warn"
@@ -207,9 +208,9 @@ def _check_codex_registration(
     path = codex_config_path(codex_home)
     if not path.exists():
         return ("Codex MCP registration", WARN, "config.toml missing; run `bridge install`")
-    text = path.read_text()
-    if "[mcp_servers.bridge]" not in text:
+    if not codex_mcp_server_registered(codex_home):
         return ("Codex MCP registration", FAIL, "bridge server not registered")
+    text = path.read_text()
     command = _codex_registered_command(text)
     problem = _unresolvable_command(command, which)
     if problem:
@@ -219,7 +220,7 @@ def _check_codex_registration(
 
 def _codex_registered_command(text: str) -> str:
     """The ``command = "..."`` value inside the bridge TOML table, or ``""``."""
-    _, _, rest = text.partition("[mcp_servers.bridge]")
+    _, _, rest = text.partition(f"[mcp_servers.{CODEX_MCP_SERVER_NAME}]")
     for line in rest.splitlines():
         stripped = line.strip()
         if stripped.startswith("["):

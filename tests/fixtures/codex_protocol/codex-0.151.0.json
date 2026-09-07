@@ -76,9 +76,9 @@
       "createdAt",
       "source",
       "cliVersion",
-      "threadSource",
       "ephemeral"
-    ]
+    ],
+    "Thread.optional_nullable": ["threadSource"]
   },
   "thread_discovery": {
     "tui_thread_is_created_eagerly_on_tui_launch": true,

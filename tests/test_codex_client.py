@@ -47,7 +47,9 @@ from bridge.codex_app_server import (
     is_bindable_thread,
     parse_codex_version,
 )
+from bridge.install import codex_mcp_block
 from bridge.mcp import INTERNAL_ERROR, METHOD_NOT_FOUND, JsonRpcError
+from bridge.paths import CODEX_MCP_SERVER_NAME
 
 from .fakes.codex_app_server import FakeCodexAppServer
 
@@ -147,6 +149,15 @@ def test_pinned_contract_matches_the_fixture():
         CONTRACT["thread_discovery"]["bindable_thread_rule"]
         == "ephemeral is not true and threadSource == user"
     )
+    # Thread.required (per the real 0.151.0 schema) includes `ephemeral` but not
+    # `threadSource` -- the latter is optional *and* nullable.
+    assert "ephemeral" in CONTRACT["types"]["Thread.required_subset"]
+    assert "threadSource" not in CONTRACT["types"]["Thread.required_subset"]
+    assert CONTRACT["types"]["Thread.optional_nullable"] == ["threadSource"]
+    # Bridge's MCP server name is a single constant everywhere it's spelled out:
+    # the `-c` override prefix and the `[mcp_servers.<name>]` TOML block header.
+    assert MCP_ENV_OVERRIDE.startswith(f"mcp_servers.{CODEX_MCP_SERVER_NAME}.env.")
+    assert f"[mcp_servers.{CODEX_MCP_SERVER_NAME}]\n" in codex_mcp_block("bridge")
 
 
 # --- initialize ------------------------------------------------------------
@@ -375,9 +386,14 @@ def test_bind_seed_ignores_ephemeral_system_threads(client_pair):
 def test_missing_thread_source_and_ephemeral_are_still_bindable():
     assert is_bindable_thread({"id": "t1", "cwd": "/work/mine"}) is True
     assert is_bindable_thread({"id": "t1", "cwd": "/work/mine", "ephemeral": False}) is True
+    assert is_bindable_thread({"id": "t1", "cwd": "/work/mine", "ephemeral": None}) is True
     assert (
         is_bindable_thread({"id": "t1", "cwd": "/work/mine", "threadSource": "user"}) is True
     )
+    # The real schema declares `threadSource` optional *and* nullable: a thread
+    # with `"threadSource": null` must count as bindable too, not just one
+    # missing the key entirely.
+    assert is_bindable_thread({"id": "t1", "cwd": "/work/mine", "threadSource": None}) is True
     assert is_bindable_thread({"id": "t1", "ephemeral": True}) is False
     assert is_bindable_thread({"id": "t1", "threadSource": "system"}) is False
 
