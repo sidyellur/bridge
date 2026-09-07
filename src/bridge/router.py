@@ -446,7 +446,7 @@ class _Conn:
 
     def queue(self, frame: dict[str, Any]) -> None:
         if self.on_frame is not None:
-            self.on_frame("router", "out", frame)
+            self.on_frame(FRAME_SOURCE, "out", frame)
         self.outbound.extend(encode_frame(frame))
 
 
@@ -473,6 +473,13 @@ class SocketNotifier:
             return
         conn.queue(ok_response(req_id, result))
         self._server.want_write(conn)
+
+
+#: The ``source`` a `bridge lab` capture records for every frame
+#: ``RouterServer`` hands to its ``on_frame`` hook. Named here so
+#: ``bridge.lab.cli`` can reference the real value instead of duplicating the
+#: ``"router"`` literal in :meth:`RouterServer._handle_frame`.
+FRAME_SOURCE = "router"
 
 
 class RouterServer:
@@ -640,7 +647,7 @@ class RouterServer:
 
     def _handle_frame(self, conn: _Conn, frame: dict[str, Any]) -> None:
         if self._on_frame is not None:
-            self._on_frame("router", "in", frame)
+            self._on_frame(FRAME_SOURCE, "in", frame)
         if frame.get("t") != "req":
             return
         req_id = frame.get("id")

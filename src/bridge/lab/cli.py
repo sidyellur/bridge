@@ -37,17 +37,22 @@ from pathlib import Path
 from typing import Any
 
 from .. import __version__
+from ..claude_channel import RPC_ENDPOINT_NAME as CLAUDE_CHANNEL_SOURCE
 from ..codex_app_server import (
     FORBIDDEN_METHODS,
     N_ITEM_COMPLETED,
     N_ITEM_DELTA,
     N_ITEM_STARTED,
 )
+from ..codex_app_server import RPC_ENDPOINT_NAME as CODEX_APP_SERVER_SOURCE
 from ..paths import Paths
+from ..router import FRAME_SOURCE as ROUTER_SOURCE
+from ..server import RPC_ENDPOINT_NAME as BRIDGE_MCP_SOURCE
 from .capture import (
     CAPTURE_ENV,
     CAPTURE_FILENAME,
     CAPTURE_FULL_ENV,
+    DIRECTION_OUT,
     CaptureTail,
     frame_method,
     frame_params,
@@ -59,9 +64,20 @@ RUNS_RELPATH = Path("docs/experiments/runs")
 VERDICT_PREFIX = "Verdict:"
 LAB_SESSION_ID = "bridge-lab"
 
-#: Never issued, never expected. Seeing one in a capture fails Experiment G
+#: Never issued, never expected. Seeing one *sent by Bridge* fails Experiment G
 #: outright, whatever else happened.
 FORBIDDEN_FRAME_METHODS = FORBIDDEN_METHODS
+
+#: The real ``RpcEndpoint``/``RouterServer`` source names Bridge's own
+#: components capture frames under (``bridge/server.py``,
+#: ``bridge/claude_channel.py``, ``bridge/codex_app_server.py``,
+#: ``bridge/router.py``) -- referenced, not duplicated, so this can't drift
+#: from the actual endpoint names. A shared capture file also carries frames
+#: from whatever fake/test peer Bridge is talking to (e.g. a test's
+#: ``fake-codex-app-server``, or bare endpoint names like ``left``/``right``
+#: in unrelated tests); a forbidden method on one of *those* is not Bridge
+#: steering anything and must never count.
+BRIDGE_SOURCES = (CODEX_APP_SERVER_SOURCE, CLAUDE_CHANNEL_SOURCE, BRIDGE_MCP_SOURCE, ROUTER_SOURCE)
 
 CHANNEL_NOTIFICATION = "notifications/claude/channel"
 
@@ -424,7 +440,22 @@ def _new_entries(
 
 
 def _steer_frames(ctx: LabContext) -> list[dict[str, Any]]:
-    return [r for r in ctx.tail.all_records() if frame_method(r) in FORBIDDEN_FRAME_METHODS]
+    """Forbidden-method frames that Bridge's own endpoints *sent*.
+
+    A capture file is shared: it also holds frames from whatever peer Bridge
+    is talking to (a live vendor CLI, or a test's fake App Server / arbitrary
+    endpoint names). A forbidden method arriving *from* that peer, or
+    appearing under a source Bridge never registers, is not Bridge steering
+    anything -- only ``direction == "out"`` from one of :data:`BRIDGE_SOURCES`
+    counts against Experiment G.
+    """
+    return [
+        r
+        for r in ctx.tail.all_records()
+        if frame_method(r) in FORBIDDEN_FRAME_METHODS
+        and r.get("direction") == DIRECTION_OUT
+        and r.get("source") in BRIDGE_SOURCES
+    ]
 
 
 def _turn_id(container: Mapping[str, Any]) -> Any:
@@ -657,11 +688,11 @@ def _run_g(ctx: LabContext) -> tuple[int, dict[str, Any]]:
     steer = _steer_frames(ctx)
     if steer:
         ctx.out(
-            f"FAIL: {len(steer)} forbidden frame(s) in the capture - "
+            f"FAIL: {len(steer)} forbidden frame(s) sent by Bridge - "
             "Bridge must never steer or interrupt"
         )
     else:
-        ctx.out("observed: no turn/steer frame in the capture")
+        ctx.out("observed: no turn/steer frame sent by Bridge")
 
     ok = became_busy and held and delivered and not steer
     return (0 if ok else 1), {

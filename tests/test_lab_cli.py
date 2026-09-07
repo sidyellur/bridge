@@ -17,6 +17,7 @@ import socket
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -520,6 +521,16 @@ def test_correlate_turns_ignores_legacy_turn_id_frames():
 
 
 def test_run_g_holds_while_working_delivers_on_idle_and_sees_no_steer(paths, run_dir):
+    # A forbidden-method frame from a non-Bridge source (the fake peer itself,
+    # or an unrelated test endpoint) must never count against G -- only a
+    # frame Bridge's own endpoints *sent* does.
+    wire = run_dir / capture.CAPTURE_FILENAME
+    writer = capture.CaptureWriter(wire)
+    writer.on_frame(
+        "fake-codex-app-server", "in", {"jsonrpc": "2.0", "id": 1, "method": "turn/steer"}
+    )
+    writer.on_frame("left", "out", {"jsonrpc": "2.0", "id": 2, "method": "turn/interrupt"})
+
     out = Out()
     with RunningRouter(paths) as rr:
         adapter, server = _make_codex(rr, "codex-1")
@@ -560,7 +571,7 @@ def test_run_g_holds_while_working_delivers_on_idle_and_sees_no_steer(paths, run
     assert summary["delivered_on_idle"] is True
     assert summary["steer_frames"] == 0
     assert server.forbidden_calls == []
-    assert "no turn/steer frame in the capture" in out.text
+    assert "no turn/steer frame sent by Bridge" in out.text
 
 
 def test_run_g_hard_fails_on_any_turn_steer_frame(paths, run_dir):
@@ -595,8 +606,35 @@ def test_run_g_hard_fails_on_any_turn_steer_frame(paths, run_dir):
             server.close()
 
     assert rc == 1
-    assert "FAIL: 1 forbidden frame(s) in the capture" in out.text
+    assert "FAIL: 1 forbidden frame(s) sent by Bridge" in out.text
     assert _summary(run_dir, "G")["steer_frames"] == 1
+
+
+def test_steer_scan_ignores_frames_from_non_bridge_sources(tmp_path):
+    """``_steer_frames`` counts only ``turn/steer``-family frames that Bridge's
+    own endpoints *sent* (direction ``out``, source in ``BRIDGE_SOURCES``) --
+    not any forbidden method that merely appears somewhere in a shared
+    capture, regardless of who wrote it or which direction it went."""
+    from bridge.lab.cli import _steer_frames
+
+    wire = tmp_path / capture.CAPTURE_FILENAME
+    writer = capture.CaptureWriter(wire)
+    # A fake peer's own outbound `turn/steer` (inbound to Bridge) is not
+    # Bridge steering anything.
+    writer.on_frame(
+        "fake-codex-app-server", "in", {"jsonrpc": "2.0", "id": 1, "method": "turn/steer"}
+    )
+    # An arbitrary non-Bridge endpoint name used by unrelated tests.
+    writer.on_frame("left", "out", {"jsonrpc": "2.0", "id": 2, "method": "turn/steer"})
+
+    ctx = SimpleNamespace(tail=capture.CaptureTail(wire))
+    assert _steer_frames(ctx) == []
+
+    # The real thing: Bridge's own codex-app-server endpoint sending it out.
+    writer.on_frame(
+        "codex-app-server", "out", {"jsonrpc": "2.0", "id": 3, "method": "turn/steer"}
+    )
+    assert len(_steer_frames(ctx)) == 1
 
 
 def test_run_g_targets_the_explicit_claude_id_even_with_a_reachable_codex_session(paths, run_dir):

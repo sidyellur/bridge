@@ -87,6 +87,12 @@ SERVER_NOTIFICATIONS = (
 
 FORBIDDEN_METHODS = ("turn/steer", "turn/interrupt", "review/start")
 
+#: The ``RpcEndpoint`` name this client registers under -- also the
+#: ``source`` field a `bridge lab` capture records for every frame it
+#: sends/receives. Named here so ``bridge.lab.cli`` can reference the real
+#: value instead of duplicating the ``name="codex-app-server"`` literal below.
+RPC_ENDPOINT_NAME = "codex-app-server"
+
 #: Server notifications Bridge asks the App Server not to send it at all.
 OPT_OUT_NOTIFICATION_METHODS = (
     "remoteControl/status/changed",
@@ -255,7 +261,7 @@ class CodexAppServerClient:
         self._on_disconnect = on_disconnect
         self.rpc = RpcEndpoint(
             sock,
-            name="codex-app-server",
+            name=RPC_ENDPOINT_NAME,
             framing=Framing.WS_CLIENT,
             on_close=self._on_rpc_closed,
         )
