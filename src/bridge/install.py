@@ -12,6 +12,7 @@ unless a purge is requested.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import stat
 import sys
@@ -208,7 +209,6 @@ def uninstall(
     claude_home: Path,
     codex_home: Path,
     purge_transcripts: bool = False,
-    bridge_executable: str | None = None,
 ) -> InstallReport:
     report = InstallReport()
 
@@ -264,7 +264,17 @@ def _merge_json_mcp(path: Path, family: str, command: str) -> None:
         "command": command,
         "args": ["serve", "--family", family],
     }
-    path.write_text(json.dumps(data, indent=2) + "\n")
+    _write_json_atomic(path, data)
+
+
+def _write_json_atomic(path: Path, data: dict) -> None:
+    """Truncating ``path`` in place would leave the user's Claude Code state
+    empty or half-written if we die mid-write — or if a live Claude Code reads
+    it in that window — so publish the new content with an atomic rename."""
+    tmp = path.with_name(path.name + ".bridge-tmp")
+    tmp.write_text(json.dumps(data, indent=2) + "\n")
+    _chmod_600(tmp)
+    os.replace(tmp, path)
     _chmod_600(path)
 
 
@@ -290,7 +300,7 @@ def _remove_json_mcp(path: Path) -> bool:
         del servers["bridge"]
         if not servers:
             data.pop("mcpServers", None)
-        path.write_text(json.dumps(data, indent=2) + "\n")
+        _write_json_atomic(path, data)
         return True
     return False
 
@@ -350,8 +360,6 @@ def _chmod_600(path: Path) -> None:
 
 
 def cli_install(dry_run: bool = False) -> int:
-    import os
-
     paths = Paths.resolve()
     home = Path(os.environ.get("HOME", str(Path.home())))
     try:
@@ -368,15 +376,9 @@ def cli_install(dry_run: bool = False) -> int:
     return 0
 
 
-def cli_uninstall() -> int:
-    import os
-
+def cli_uninstall() -> int:  # pragma: no cover - thin shim
     paths = Paths.resolve()
     home = Path(os.environ.get("HOME", str(Path.home())))
-    try:
-        report = uninstall(paths=paths, claude_home=home / ".claude", codex_home=home / ".codex")
-    except InstallError as exc:
-        print(f"bridge uninstall: {exc}", file=sys.stderr)
-        return 1
+    report = uninstall(paths=paths, claude_home=home / ".claude", codex_home=home / ".codex")
     print(report.render())
     return 0

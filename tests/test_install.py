@@ -185,6 +185,35 @@ def test_install_refuses_to_overwrite_unparsable_claude_json(paths, fake_user_ho
     assert config.read_bytes() == before
 
 
+def test_install_publishes_claude_json_atomically(paths, fake_user_home):
+    """The user's Claude Code state is never truncated in place: the new content
+    is written to a sibling temp file and renamed over the original."""
+    config = claude_mcp_config_path(fake_user_home / ".claude")
+    config.write_text(json.dumps({"numStartups": 3}))
+    _install(paths, fake_user_home)
+    leftovers = [p.name for p in config.parent.iterdir() if p.name.startswith(".claude.json.")]
+    assert leftovers == []
+    data = json.loads(config.read_text())
+    assert data["numStartups"] == 3
+    assert "bridge" in data["mcpServers"]
+
+
+def test_uninstall_publishes_claude_json_atomically(paths, fake_user_home):
+    config = claude_mcp_config_path(fake_user_home / ".claude")
+    config.write_text(json.dumps({"numStartups": 3}))
+    _install(paths, fake_user_home)
+    uninstall(
+        paths=paths,
+        claude_home=fake_user_home / ".claude",
+        codex_home=fake_user_home / ".codex",
+    )
+    leftovers = [p.name for p in config.parent.iterdir() if p.name.startswith(".claude.json.")]
+    assert leftovers == []
+    data = json.loads(config.read_text())
+    assert data["numStartups"] == 3
+    assert "bridge" not in data.get("mcpServers", {})
+
+
 def test_install_refuses_a_claude_json_that_is_not_an_object(paths, fake_user_home):
     config = claude_mcp_config_path(fake_user_home / ".claude")
     config.write_text("[1, 2, 3]")
