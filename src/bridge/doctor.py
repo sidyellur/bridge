@@ -224,7 +224,7 @@ def _codex_registered_command(text: str) -> str:
         stripped = line.strip()
         if stripped.startswith("["):
             break
-        if stripped.startswith("command"):
+        if stripped.split("=", 1)[0].strip() == "command":
             _, _, raw = stripped.partition("=")
             try:
                 value = json.loads(raw.strip())
@@ -261,17 +261,22 @@ def _channel_mode_check(probe: Callable[[], ChannelMode] | None) -> tuple[str, s
 
 
 def _handshake_check(paths: Paths) -> tuple[str, str, str]:
-    """Report which Claude sessions recorded an initialize handshake in their
-    session.json. Claude Code drops the events of a channel it never loaded
+    """Report which live Claude sessions recorded an initialize handshake in
+    their session.json. Claude Code drops the events of a channel it never loaded
     without telling the server, so a missing handshake is the only local signal
     that Bridge was not registered. Token-free: reads only what is on disk."""
     name = "Claude channel handshake"
     sessions_dir = paths.sessions_dir
-    if not sessions_dir.exists():
+    # Session dirs outlive their sessions, so only sessions the store still
+    # considers live can say anything about the current install.
+    live = _live_claude_session_ids(paths)
+    if not sessions_dir.exists() or not live:
         return (name, OK, "no managed sessions recorded")
     clients: list[str] = []
     missing: list[str] = []
     for meta_path in sorted(sessions_dir.glob("*/session.json")):
+        if meta_path.parent.name not in live:
+            continue
         try:
             data = json.loads(meta_path.read_text())
         except (OSError, json.JSONDecodeError):
@@ -287,16 +292,44 @@ def _handshake_check(paths: Paths) -> tuple[str, str, str]:
             info = info if isinstance(info, dict) else {}
             clients.append(f"{info.get('name') or 'unknown'} {info.get('version') or 'unknown'}")
         else:
-            missing.append(
-                f"session {meta_path.parent.name} has no recorded initialize handshake; "
-                "Claude may not have loaded the Bridge server (check the startup "
-                "channels notice)"
-            )
+            missing.append(meta_path.parent.name)
     if missing:
-        return (name, WARN, "; ".join(missing))
+        return (name, WARN, _missing_handshake_detail(missing))
     if not clients:
         return (name, OK, "no managed sessions recorded")
     return (name, OK, f"{len(clients)} session(s) completed initialize ({', '.join(clients)})")
+
+
+def _missing_handshake_detail(missing: list[str], limit: int = 3) -> str:
+    listed = ", ".join(missing[:limit])
+    if len(missing) > limit:
+        listed += f" (+{len(missing) - limit} more)"
+    subject = f"session {listed} has" if len(missing) == 1 else f"sessions {listed} have"
+    return (
+        f"{subject} no recorded initialize handshake; Claude may not have loaded "
+        "the Bridge server (check the startup channels notice)"
+    )
+
+
+def _live_claude_session_ids(paths: Paths) -> set[str]:
+    """Managed Claude sessions the store does not consider offline."""
+    if not paths.db.exists():
+        return set()
+
+    from .store import STATE_OFFLINE, Store
+
+    try:
+        store = Store.open(paths, read_only=True)
+    except Exception:  # noqa: BLE001 - a corrupt/locked db is reported by the liveness row
+        return set()
+    try:
+        return {
+            s.id
+            for s in store.list_sessions(include_unmanaged=False)
+            if s.family == "claude" and s.state != STATE_OFFLINE
+        }
+    finally:
+        store.close()
 
 
 def _has_guidance(path: Path) -> bool:

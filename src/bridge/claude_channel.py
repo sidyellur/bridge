@@ -35,6 +35,11 @@ MCP_PROTOCOL_VERSION = "2024-11-05"
 META_KEY_RE = re.compile(r"^[A-Za-z0-9_]+$")
 META_FIELDS = ("kind", "call_id", "from", "message_id")
 
+#: Meta values are session-controllable text (``from`` carries the peer's own
+#: last_user_message) rendered as XML attributes, so anything that could close
+#: the attribute or open a tag is replaced before it reaches the model.
+META_VALUE_UNSAFE_RE = re.compile(r"[\"<>&\x00-\x1f\x7f]")
+
 SYSTEM_INSTRUCTIONS = (
     "Bridge coordinates live agent sessions. Inbound events arrive in your "
     f'context as <channel source="{CHANNEL_SOURCE}" kind="call|text|call_result" '
@@ -52,7 +57,15 @@ SYSTEM_INSTRUCTIONS = (
 
 def channel_meta(event: Mapping[str, Any]) -> dict[str, str]:
     """The event's metadata as the documented ``meta`` attribute map."""
-    return {k: str(event[k]) for k in META_FIELDS if event.get(k) is not None}
+    return {
+        k: _meta_value(str(event[k]))
+        for k in META_FIELDS
+        if META_KEY_RE.match(k) and event.get(k) is not None
+    }
+
+
+def _meta_value(value: str) -> str:
+    return " ".join(META_VALUE_UNSAFE_RE.sub(" ", value).split())
 
 
 class ClaudeChannelAdapter:

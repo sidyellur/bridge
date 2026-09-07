@@ -213,6 +213,19 @@ def test_codex_registered_bare_command_off_path_fails(paths, fake_user_home):
     )
 
 
+def test_codex_registration_reads_the_command_key_not_a_prefix(paths, fake_user_home):
+    exe = _fake_bridge_executable(fake_user_home)
+    codex_config_path(fake_user_home / ".codex").write_text(
+        "[mcp_servers.bridge]\n"
+        'command_timeout = "30s"\n'
+        f"command = {json.dumps(exe)}\n"
+        'args = ["serve", "--family", "codex"]\n'
+    )
+    report = _doctor(paths, fake_user_home)
+    assert _status(report, "Codex MCP registration") == OK
+    assert _detail(report, "Codex MCP registration") == f"config.toml ({exe})"
+
+
 def test_channel_mode_ok_for_plugin(paths, fake_user_home):
     probe = lambda: ChannelMode(  # noqa: E731
         ChannelSupport.PLUGIN, "3.0.0", ["--channels", "plugin:bridge@test-marketplace"]
@@ -245,6 +258,19 @@ def test_channel_mode_fails_when_unsupported(paths, fake_user_home):
     assert not report.ok
 
 
+def _record_claude_sessions(paths, *session_ids, state="idle"):
+    """Claude sessions the store still considers live, as `bridge claude` records
+    them; the handshake row only speaks about these."""
+    from bridge.store import Store
+
+    store = Store.open(paths)
+    try:
+        for sid in session_ids:
+            store.upsert_session(sid, "claude", state=state, is_managed=True, reachable=True)
+    finally:
+        store.close()
+
+
 def test_handshake_check_ok_when_no_sessions(paths, fake_user_home):
     _install(paths, fake_user_home)
     report = _doctor(paths, fake_user_home)
@@ -268,6 +294,7 @@ def test_handshake_check_ok_when_every_claude_session_initialized(paths, fake_us
     )
     paths.ensure_session_dir("codex-1")
     paths.session_meta("codex-1").write_text(json.dumps({"family": "codex"}))
+    _record_claude_sessions(paths, "claude-1")
     report = _doctor(paths, fake_user_home)
     assert _status(report, "Claude channel handshake") == OK
     assert _detail(report, "Claude channel handshake") == (
@@ -280,6 +307,7 @@ def test_handshake_check_warns_when_a_session_never_initialized(paths, fake_user
     the channel adds no `handshake` to it, which is what the row must catch."""
     _install(paths, fake_user_home)
     paths.merge_session_meta("claude-1", {"family": "claude"})
+    _record_claude_sessions(paths, "claude-1")
     report = _doctor(paths, fake_user_home)
     assert _status(report, "Claude channel handshake") == WARN
     assert _detail(report, "Claude channel handshake") == (
@@ -287,6 +315,53 @@ def test_handshake_check_warns_when_a_session_never_initialized(paths, fake_user
         "have loaded the Bridge server (check the startup channels notice)"
     )
     assert report.ok  # WARN alone does not fail the overall report
+
+
+def test_handshake_check_ignores_sessions_the_store_calls_offline(paths, fake_user_home):
+    """A stub outlives its session, so an exited session must not warn forever."""
+    _install(paths, fake_user_home)
+    paths.merge_session_meta("claude-1", {"family": "claude"})
+    _record_claude_sessions(paths, "claude-1", state="offline")
+    report = _doctor(paths, fake_user_home)
+    assert _status(report, "Claude channel handshake") == OK
+    assert _detail(report, "Claude channel handshake") == "no managed sessions recorded"
+
+
+def test_handshake_check_ok_when_the_store_has_no_db(paths, fake_user_home):
+    _install(paths, fake_user_home)
+    paths.merge_session_meta("claude-1", {"family": "claude"})
+    assert not paths.db.exists()
+    report = _doctor(paths, fake_user_home)
+    assert _status(report, "Claude channel handshake") == OK
+    assert _detail(report, "Claude channel handshake") == "no managed sessions recorded"
+
+
+def test_handshake_check_names_every_live_session_up_to_three(paths, fake_user_home):
+    _install(paths, fake_user_home)
+    for sid in ("claude-1", "claude-2"):
+        paths.merge_session_meta(sid, {"family": "claude"})
+    _record_claude_sessions(paths, "claude-1", "claude-2")
+    report = _doctor(paths, fake_user_home)
+    assert _status(report, "Claude channel handshake") == WARN
+    assert _detail(report, "Claude channel handshake") == (
+        "sessions claude-1, claude-2 have no recorded initialize handshake; Claude "
+        "may not have loaded the Bridge server (check the startup channels notice)"
+    )
+
+
+def test_handshake_check_caps_the_listed_sessions(paths, fake_user_home):
+    _install(paths, fake_user_home)
+    ids = [f"claude-{i}" for i in range(1, 6)]
+    for sid in ids:
+        paths.merge_session_meta(sid, {"family": "claude"})
+    _record_claude_sessions(paths, *ids)
+    report = _doctor(paths, fake_user_home)
+    assert _status(report, "Claude channel handshake") == WARN
+    assert _detail(report, "Claude channel handshake") == (
+        "sessions claude-1, claude-2, claude-3 (+2 more) have no recorded initialize "
+        "handshake; Claude may not have loaded the Bridge server (check the startup "
+        "channels notice)"
+    )
 
 
 def test_bad_token_permissions_fail(paths, fake_user_home):

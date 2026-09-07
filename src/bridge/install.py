@@ -185,6 +185,12 @@ def install(
         if not dry_run:
             _write_channel_args(channel_args_path, mode.launch_args)
         report.touched.append(channel_args_path)
+    elif channel_args_path.exists():
+        # A flag this `claude` rejects would kill the wrapper on every launch.
+        if not dry_run:
+            _remove(channel_args_path)
+        report.removed.append(channel_args_path)
+        report.notes.append("stale channel launch args removed")
     if mode.support is ChannelSupport.PLUGIN:
         report.notes.append(
             f"Claude Channel mode: plugin (claude {mode.version or 'unknown'}); "

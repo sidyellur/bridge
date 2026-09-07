@@ -221,7 +221,8 @@ def run_wrapper(
         argv = build_claude_argv(binary, session_id, user_args, channel_args, is_resume=is_resume)
         # A session that never completes the channel handshake writes nothing of its
         # own, so leave this stub for `bridge doctor` to find missing a handshake.
-        paths.merge_session_meta(session_id, {"family": "claude"})
+        # Dropping any previous run's handshake keeps a resume honest.
+        paths.merge_session_meta(session_id, {"family": "claude"}, drop=("handshake",))
     elif family == "codex":
         return _run_codex_wrapper(
             user_args,

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -82,10 +82,12 @@ class Paths:
     def codex_socket(self, session_id: str) -> Path:
         return self.session_dir(session_id) / "codex.sock"
 
-    def merge_session_meta(self, session_id: str, updates: Mapping[str, Any]) -> None:
-        """Best-effort top-level merge into ``session.json``. Never raises -- a
-        session directory Bridge cannot write to must not break the wrapper or
-        the adapter that called this."""
+    def merge_session_meta(
+        self, session_id: str, updates: Mapping[str, Any], *, drop: Sequence[str] = ()
+    ) -> None:
+        """Best-effort top-level merge into ``session.json``, removing the ``drop``
+        keys. Never raises -- a session directory Bridge cannot write to must not
+        break the wrapper or the adapter that called this."""
         path = self.session_meta(session_id)
         data: dict[str, Any] = {}
         try:
@@ -95,6 +97,8 @@ class Paths:
         if isinstance(existing, dict):
             data = existing
         data.update(updates)
+        for key in drop:
+            data.pop(key, None)
         try:
             self.ensure_session_dir(session_id)
             # Write-then-rename: a reader (doctor, or the wrapper's own stub) must

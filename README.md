@@ -72,13 +72,15 @@ finds, instead of assuming a fixed mode:
 after the session address. Re-run `bridge install` after upgrading `claude` to
 re-detect and pick up a better mode. Claude Code never tells a server that it
 declined to load it as a channel — unregistered channels drop events silently —
-so **Claude channel handshake** in `bridge doctor` reports which sessions
+so **Claude channel handshake** in `bridge doctor` reports which live sessions
 completed the MCP initialize handshake with Bridge. `bridge claude` records
-every session it launches, so one warned about there never loaded the Bridge
-server at all. When that row warns — or events never arrive despite a recorded
+every session it launches, so a session warned about there never completed that
+initialize with Bridge — it may have been quit immediately, or the server may be
+disabled for it. When that row warns — or events never arrive despite a recorded
 handshake — check the channels notice `claude` prints at startup: it names the
 channels it loaded and is the only place an allowlist or organization-policy
-rejection is visible.
+rejection is visible. Run `bridge install` with Claude Code closed: it rewrites
+`~/.claude.json`.
 
 ## Launch flow
 
@@ -244,6 +246,11 @@ Channel mode (see [Channel modes](#channel-modes) above) and the recorded
 channel handshakes, vendor binaries, absence of obsolete artifacts,
 and runs a token-free local loopback protocol probe (it never spends model
 tokens).
+
+If `claude` starts rejecting the channel flag (for example once the research
+preview ends and the flag is removed), re-run `bridge install` — it re-detects
+the mode and clears the stale launch args — or delete
+`~/.bridge/claude_channel_args.json` yourself.
 
 ## Status
 

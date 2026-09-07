@@ -212,6 +212,35 @@ def test_run_wrapper_claude_writes_a_session_meta_stub(paths, tmp_path, ids):
     assert meta == {"family": "claude"}
 
 
+def test_run_wrapper_claude_clears_a_stale_handshake(paths, tmp_path, ids):
+    """A resumed session must re-prove the handshake: the previous run's record
+    would otherwise make doctor report a channel that no longer loads as OK."""
+    capture = tmp_path / "cap.jsonl"
+    bindir = tmp_path / "bin"
+    make_capture_exe(bindir, "claude", capture)
+    paths.merge_session_meta(
+        "resumed-1",
+        {"family": "claude", "handshake": {"client_info": {"name": "claude-code"}}},
+    )
+
+    with RunningRouter(paths) as rr:
+        env = {"PATH": f"{bindir}", "BRIDGE_CLAUDE_BIN": str(bindir / "claude")}
+        run_wrapper(
+            "claude",
+            ["--resume", "resumed-1"],
+            paths=paths,
+            env=env,
+            new_id=ids.new,
+            ensure_running=lambda p: None,
+            connect=lambda paths, session_id, role: rr.client(session_id=session_id, role=role),
+            forward_signals=False,
+            print_address=False,
+        )
+
+    meta = json.loads(paths.session_meta("resumed-1").read_text())
+    assert meta == {"family": "claude"}
+
+
 def test_run_wrapper_claude_prints_channel_mode_line(paths, tmp_path, ids, capsys):
     capture = tmp_path / "cap.jsonl"
     bindir = tmp_path / "bin"

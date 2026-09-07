@@ -152,6 +152,34 @@ def test_install_writes_nothing_for_unsupported_channel(paths, fake_user_home):
     assert any("inbound-unreachable" in n for n in report.notes)
 
 
+def test_install_removes_stale_channel_args_when_unsupported(paths, fake_user_home):
+    """Doctor re-probes the binary, so a leftover args file would keep launching
+    `claude` with a flag it no longer accepts."""
+    args_file = paths.home / "claude_channel_args.json"
+    dev = _fake_probe(ChannelSupport.DEVELOPMENT, "2.0.0", DEV_CHANNEL_ARGS)
+    _install(paths, fake_user_home, probe=dev)
+    assert args_file.exists()
+
+    report = _install(paths, fake_user_home, probe=_fake_probe(ChannelSupport.UNSUPPORTED, "0.9.0"))
+    assert not args_file.exists()
+    assert args_file in report.removed
+    assert "stale channel launch args removed" in report.notes
+
+
+def test_dry_run_keeps_stale_channel_args_when_unsupported(paths, fake_user_home):
+    args_file = paths.home / "claude_channel_args.json"
+    plugin = _fake_probe(ChannelSupport.PLUGIN, "3.0.0", ["--channels", "x"])
+    _install(paths, fake_user_home, probe=plugin)
+    report = _install(
+        paths,
+        fake_user_home,
+        probe=_fake_probe(ChannelSupport.UNSUPPORTED, "0.9.0"),
+        dry_run=True,
+    )
+    assert args_file.exists()
+    assert args_file in report.removed
+
+
 def test_install_unsupported_note_quotes_the_probe_detail(paths, fake_user_home):
     mode = ChannelMode(
         ChannelSupport.UNSUPPORTED,
