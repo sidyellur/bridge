@@ -208,13 +208,20 @@ class CodexAdapter:
         text = event.get("text", "")
         if kind == "call":
             self._active_call = event.get("call_id")
+        if self.app.thread_id is None:
+            # No thread bound yet. The router does not deliver to a session it
+            # has not seen go reachable, so this is a race, not a normal path.
+            return
         try:
             self.app.start_turn(text)
-        except (CodexThreadBusy, RuntimeError):
-            # The router holds delivery while the session is `working` and no
-            # thread is bound before the session is reachable, so this is only
-            # ever a race. Swallowing the ack leaves the message undelivered
-            # rather than marking it done against a turn that never started.
+        except CodexThreadBusy:
+            # The router's pump holds delivery while the session is `working`,
+            # so a refusal here is only ever a race with the status we have not
+            # reported yet. The message is already marked delivered by
+            # `delivery.pump_target` before this handler runs, so withholding
+            # the ack leaves it delivered-but-unacked: it comes back only when
+            # `redeliver_inflight` replays it on the adapter's next router
+            # reconnect. Explicitly re-queuing it instead is a follow-up.
             return
         if kind in ("text", "call_result") and event.get("message_id"):
             mid = event["message_id"]

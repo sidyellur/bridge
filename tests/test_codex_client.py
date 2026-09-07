@@ -21,13 +21,16 @@ from bridge.codex_app_server import (
     CLIENT_NOTIFICATIONS,
     CLIENT_REQUESTS,
     FORBIDDEN_METHODS,
+    ITEM_AGENT_MESSAGE,
     LAUNCH_ARGV,
     MIN_CODEX_VERSION,
     N_INITIALIZED,
+    N_ITEM_COMPLETED,
     N_ITEM_DELTA,
     N_THREAD_STARTED,
     N_THREAD_STATUS,
     N_TURN_COMPLETED,
+    N_TURN_STARTED,
     OPT_OUT_NOTIFICATION_METHODS,
     PINNED_CODEX_VERSION,
     SERVER_NOTIFICATIONS,
@@ -478,6 +481,53 @@ def test_turn_completed_reports_the_turn_status(client_pair):
 
     assert rec.completed == [(first, "completed"), (second, "failed")]
     assert client.status == STATUS_IDLE
+
+
+def test_another_threads_turn_and_item_stream_is_ignored(client_pair):
+    """A rebind never cancels the old thread's ``thread/resume``, so one
+    connection can keep receiving a thread it no longer speaks for. Its turns
+    must not move this client's status, its final messages, or its callbacks —
+    otherwise an abandoned thread could clear the adapter's active call or
+    answer it with the wrong thread's text."""
+    client, fake, rec = client_pair(resume_result="ok", auto_complete=False)
+    _bound(client, fake)
+    client.subscribe()
+    other = "thread-other"
+    assert client.thread_id != other
+    rec.statuses.clear()
+
+    fake._notify(N_TURN_STARTED, {"threadId": other, "turn": {"id": "turn-x"}})
+    fake._notify(
+        N_ITEM_DELTA,
+        {"threadId": other, "turnId": "turn-x", "itemId": "i-x", "delta": "not for us"},
+    )
+    fake._notify(
+        N_ITEM_COMPLETED,
+        {
+            "threadId": other,
+            "turnId": "turn-x",
+            "item": {"type": ITEM_AGENT_MESSAGE, "id": "i-x", "text": "wrong thread"},
+        },
+    )
+    fake._notify(
+        N_TURN_COMPLETED,
+        {"threadId": other, "turn": {"id": "turn-x", "status": "completed"}},
+    )
+    _sync(client)
+
+    assert rec.statuses == []
+    assert rec.messages == []
+    assert rec.completed == []
+    assert client.status == STATUS_IDLE
+    assert client.final_message("turn-x") is None
+
+    # The bound thread's own stream still lands, so the guard filters rather
+    # than deafens.
+    turn_id = client.start_turn("ours")
+    fake.complete_turn(turn_id, agent_message="ours")
+    _sync(client)
+    assert rec.messages == [(turn_id, "ours")]
+    assert rec.completed == [(turn_id, "completed")]
 
 
 def test_an_unsubscribed_client_still_sees_busy_and_idle(client_pair):

@@ -381,14 +381,31 @@ class CodexAppServerClient:
         if self._on_status is not None:
             self._on_status(state)
 
+    def _is_bound_thread(self, params: dict[str, Any]) -> bool:
+        """Every ``turn/*``/``item/*`` frame is filtered to the bound thread.
+
+        One connection can stay subscribed to a thread it has since rebound away
+        from (a ``thread/resume`` is never implicitly cancelled by a rebind), and
+        the abandoned thread keeps streaming. Without this guard its turns would
+        clear the adapter's active call or answer one with the wrong thread's
+        text. ``thread/status/changed`` has always filtered this way.
+        """
+        return params.get("threadId") == self.thread_id
+
     def _on_turn_started(self, params: dict[str, Any]) -> None:
+        if not self._is_bound_thread(params):
+            return
         self._set_status(STATUS_WORKING)
 
     def _on_item_delta(self, params: dict[str, Any]) -> None:
+        if not self._is_bound_thread(params):
+            return
         turn_id = str(params.get("turnId") or "")
         self._delta[turn_id] = self._delta.get(turn_id, "") + str(params.get("delta", ""))
 
     def _on_item_completed(self, params: dict[str, Any]) -> None:
+        if not self._is_bound_thread(params):
+            return
         item = params.get("item") or {}
         if item.get("type") != ITEM_AGENT_MESSAGE:
             return
@@ -401,6 +418,8 @@ class CodexAppServerClient:
     def _on_turn_completed_notification(self, params: dict[str, Any]) -> None:
         # Not named `_on_turn_completed`: that attribute is the caller-supplied
         # callback slot, which the adapter rebinds.
+        if not self._is_bound_thread(params):
+            return
         turn = params.get("turn") or {}
         turn_id = str(turn.get("id") or "")
         status = str(turn.get("status") or "")

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import socket
 import threading
+import time
 
 from bridge.mcp import Framing, JsonRpcError, RpcEndpoint
 from bridge.ws import recv_message, server_handshake
@@ -410,3 +411,30 @@ def test_ws_protocol_violation_tears_down_the_endpoint():
     finally:
         client_sock.close()
         server.close()
+
+
+def test_request_after_reader_death_fails_fast():
+    """A request issued once the reader thread is gone must not wait out its
+    timeout: `_send` swallows the OSError on a dead socket, so without the
+    `_reader_done` fast path the caller blocks for the full timeout on a
+    response that can never arrive."""
+    client, peer = socket.socketpair()
+    closed = threading.Event()
+    endpoint = RpcEndpoint(client, name="a", on_close=closed.set).start()
+    try:
+        peer.close()  # the peer goes away underneath us
+        assert closed.wait(5.0), "the reader thread never reported the close"
+
+        started = time.monotonic()
+        try:
+            endpoint.request("m", timeout=5.0)
+        except JsonRpcError as exc:
+            elapsed = time.monotonic() - started
+            message = exc.message
+        else:
+            raise AssertionError("request on a dead endpoint returned instead of raising")
+
+        assert "connection closed" in message
+        assert elapsed < 1.0, f"waited {elapsed:.2f}s instead of failing fast"
+    finally:
+        endpoint.close()
