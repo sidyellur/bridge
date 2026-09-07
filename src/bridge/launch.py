@@ -324,7 +324,10 @@ def _run_codex_wrapper(
         # of CodexAdapter's own backed-off attempts can take, not whether a
         # live server gets time to answer.
         sock = connect_app_server_socket(socket_path, timeout=0.5)
-        return CodexAppServerClient(sock).start()
+        # The cwd is how bind_thread() picks the TUI's thread out of every
+        # thread the App Server has loaded, so the replacement client needs it
+        # just as much as the first one.
+        return CodexAppServerClient(sock, cwd=os.getcwd()).start()
 
     def _print_disconnect_diagnostic() -> None:
         print(
@@ -341,6 +344,7 @@ def _run_codex_wrapper(
             app_client,
             final_message_fallback=final_message_fallback,
             cwd=os.getcwd(),
+            paths=paths,
             reconnect=_reconnect,
             on_app_server_disconnect=_print_disconnect_diagnostic,
             reconnect_sleep=sleep,
@@ -351,6 +355,12 @@ def _run_codex_wrapper(
             )
         )
         adapter.start()
+        if adapter.app.codex_version_warning:
+            print(
+                f"[bridge] codex {adapter.app.codex_version}: "
+                f"{adapter.app.codex_version_warning}",
+                file=sys.stderr,
+            )
     except Exception:
         try:
             (adapter or app_client).close()

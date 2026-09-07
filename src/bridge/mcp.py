@@ -91,6 +91,10 @@ class RpcEndpoint:
         self._id_lock = threading.Lock()
         self._send_lock = threading.Lock()
         self._closed = False
+        # Set (under _pending_lock) when the reader thread has stopped, so a
+        # request issued after the peer went away fails at once instead of
+        # blocking a caller for the whole request timeout on a dead socket.
+        self._reader_done = False
         self._thread = threading.Thread(target=self._read_loop, daemon=True, name=f"rpc-{name}")
 
     def start(self) -> RpcEndpoint:
@@ -119,6 +123,11 @@ class RpcEndpoint:
             req_id = self._id
         pending = _Pending()
         with self._pending_lock:
+            # Registering and checking under one lock closes the race with
+            # _fail_pending(): either this pending is registered in time to be
+            # failed by it, or the flag is already visible here.
+            if self._reader_done or self._closed:
+                raise JsonRpcError(INTERNAL_ERROR, "connection closed")
             self._pending[req_id] = pending
         self._send({"jsonrpc": "2.0", "id": req_id, "method": method, "params": params or {}})
         if not pending.event.wait(timeout):
@@ -267,6 +276,7 @@ class RpcEndpoint:
 
     def _fail_pending(self) -> None:
         with self._pending_lock:
+            self._reader_done = True
             pendings = list(self._pending.values())
             self._pending.clear()
         for p in pendings:

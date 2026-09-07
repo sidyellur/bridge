@@ -102,6 +102,8 @@ THREAD_STATUS_TO_STATE = {
     THREAD_STATUS_SYSTEM_ERROR: STATUS_IDLE,
 }
 
+TURN_STATUS_COMPLETED = "completed"
+
 SYSTEM_ERROR_MESSAGE = "thread reported systemError"
 
 _VERSION_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)")
@@ -333,6 +335,13 @@ class CodexAppServerClient:
         if text is None:
             text = self._delta.get(turn_id)
         return text or None
+
+    def pop_final_message(self, turn_id: str) -> str | None:
+        """:meth:`final_message`, evicting it. A long-lived session's completed
+        turns must not accumulate their transcripts here forever."""
+        text = self._items.pop(turn_id, None)
+        delta = self._delta.pop(turn_id, None)
+        return (text if text is not None else delta) or None
 
     # --- notification handlers (reader thread; never issue a request) -------
     def _on_thread_started(self, params: dict[str, Any]) -> None:

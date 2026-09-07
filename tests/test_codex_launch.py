@@ -13,6 +13,7 @@ entry; and a socket that never appears fails cleanly with no leaked process.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import signal
@@ -163,6 +164,58 @@ def test_session_registered_reachable_and_idle_while_tui_runs(paths, codex_bin, 
         assert result_box["result"].returncode == 0
         final = _roster_entry(rr.client(), session_id)
         assert final["state"] == "offline"
+
+
+def test_session_meta_is_written_for_a_wrapped_codex_session(paths, codex_bin, ids):
+    bindir, capture, release = codex_bin
+    make_fake_codex_exe(bindir, capture=capture, release_file=release, tui_exit_code=0)
+
+    with RunningRouter(paths) as rr:
+        env = {"PATH": str(bindir), "BRIDGE_CODEX_BIN": str(bindir / "codex")}
+        result_box = {}
+
+        def go():
+            result_box["result"] = run_wrapper(
+                "codex",
+                [],
+                paths=paths,
+                env=env,
+                new_id=ids.new,
+                ensure_running=lambda p: None,
+                connect=lambda paths, session_id, role, on_event=None: _connect_with_events(
+                    rr, paths, session_id, role, on_event
+                ),
+                forward_signals=False,
+                print_address=False,
+            )
+
+        t = threading.Thread(target=go)
+        t.start()
+        try:
+            assert _wait_for(lambda: capture.exists() and read_captures(capture))
+            ctrl = rr.client(session_id="ctrl")
+            assert _wait_for(
+                lambda: any(
+                    s["family"] == "codex" and s["reachable"]
+                    for s in ctrl.call("roster", {})["sessions"]
+                )
+            )
+            session_id = next(
+                s["id"] for s in ctrl.call("roster", {})["sessions"] if s["family"] == "codex"
+            )
+
+            def meta():
+                try:
+                    return json.loads(paths.session_meta(session_id).read_text())
+                except (OSError, json.JSONDecodeError):
+                    return {}
+
+            assert _wait_for(lambda: meta().get("thread_id") == "thread-fake")
+            assert meta()["subscribed"] is True
+            assert meta()["codex_version"] == "0.151.0"
+        finally:
+            release.write_text("go")
+            t.join(timeout=15)
 
 
 def test_tui_exit_code_passes_through_and_both_children_reaped(paths, codex_bin, ids):
