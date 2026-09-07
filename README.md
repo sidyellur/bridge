@@ -32,6 +32,17 @@ permissions, and appends sentinel-fenced guidance to `~/.claude/CLAUDE.md` and
 `~/.codex/AGENTS.md` without clobbering existing content. It installs **no**
 prompt hooks and reports every file it touches. Undo with `bridge uninstall`.
 
+The Claude server goes into the top-level `mcpServers` object of
+`~/.claude.json` — the file Claude Code reads for **user-scope** MCP servers —
+under the name `bridge`, and every other key in that file is preserved. (If
+`~/.claude.json` does not parse, `bridge install` refuses rather than resetting
+your Claude Code state.) Both registrations use the **absolute path** of the
+`bridge` executable, so a virtualenv install works without `bridge` being on
+`PATH`; if only the bare name can be resolved, install says so. `bridge doctor`
+verifies that the registered command still exists and is executable (or, for a
+bare name, still resolves on `PATH`), and warns about a stale `bridge` entry
+left behind in the older `~/.claude/settings.json` location.
+
 ### Channel modes
 
 `bridge install` runs a token-free probe (`claude --version` / `claude --help`,

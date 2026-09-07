@@ -9,6 +9,8 @@ probe that spends no model tokens.
 
 from __future__ import annotations
 
+import json
+import os
 import shutil
 import stat
 from collections.abc import Callable
@@ -17,7 +19,11 @@ from pathlib import Path
 
 from . import PROTOCOL_VERSION
 from .claude_probe import ChannelMode, ChannelSupport, detect_channel_mode
-from .install import claude_settings_path, codex_config_path
+from .install import (
+    claude_legacy_settings_path,
+    claude_mcp_config_path,
+    codex_config_path,
+)
 from .paths import Paths
 
 OK = "ok"
@@ -61,6 +67,7 @@ def doctor(
     codex_home: Path,
     check_binaries: bool = True,
     probe: Callable[[], ChannelMode] | None = None,
+    which: Callable[[str], str | None] = shutil.which,
 ) -> DoctorReport:
     report = DoctorReport()
 
@@ -84,8 +91,11 @@ def doctor(
         report.add("router socket", OK, "not listening (router idle)")
 
     # MCP registration.
-    report.add(*_check_claude_registration(claude_home))
-    report.add(*_check_codex_registration(codex_home))
+    report.add(*_check_claude_registration(claude_home, which=which))
+    legacy = _check_legacy_claude_registration(claude_home)
+    if legacy is not None:
+        report.add(*legacy)
+    report.add(*_check_codex_registration(codex_home, which=which))
 
     # Coordination guidance.
     report.add(
@@ -105,8 +115,8 @@ def doctor(
 
     # Vendor binaries / remote flags.
     if check_binaries:
-        report.add("claude binary", OK if shutil.which("claude") else WARN, "on PATH")
-        report.add("codex binary", OK if shutil.which("codex") else WARN, "on PATH")
+        report.add("claude binary", OK if which("claude") else WARN, "on PATH")
+        report.add("codex binary", OK if which("codex") else WARN, "on PATH")
 
     # No prompt hooks / obsolete queue must be absent.
     obsolete = [p for p in (paths.home / "spool", paths.home / "hooks") if p.exists()]
@@ -128,29 +138,94 @@ def doctor(
     return report
 
 
-def _check_claude_registration(claude_home: Path) -> tuple[str, str, str]:
-    path = claude_settings_path(claude_home)
-    if not path.exists():
-        return ("Claude MCP registration", WARN, "settings.json missing; run `bridge install`")
-    import json
+def _unresolvable_command(command: str, which: Callable[[str], str | None]) -> str | None:
+    """Why the registered command cannot be spawned, or ``None`` if it can."""
+    if not command:
+        return "no command registered"
+    path = Path(command)
+    if path.is_absolute():
+        if path.exists() and os.access(path, os.X_OK):
+            return None
+        return f"registered command {command} does not exist or is not executable"
+    if which(command) is None:
+        return f"registered command `{command}` is not on PATH"
+    return None
 
+
+def _check_claude_registration(
+    claude_home: Path, which: Callable[[str], str | None] = shutil.which
+) -> tuple[str, str, str]:
+    path = claude_mcp_config_path(claude_home)
+    if not path.exists():
+        return ("Claude MCP registration", WARN, "~/.claude.json missing; run `bridge install`")
     try:
         data = json.loads(path.read_text())
     except json.JSONDecodeError:
-        return ("Claude MCP registration", FAIL, "settings.json is not valid JSON")
-    if "bridge" in data.get("mcpServers", {}):
-        return ("Claude MCP registration", OK, "settings.json")
-    return ("Claude MCP registration", FAIL, "bridge server not registered")
+        return ("Claude MCP registration", FAIL, "~/.claude.json is not valid JSON")
+    if not isinstance(data, dict):
+        return ("Claude MCP registration", FAIL, "~/.claude.json is not valid JSON")
+    entry = data.get("mcpServers", {}).get("bridge")
+    if not isinstance(entry, dict):
+        return (
+            "Claude MCP registration",
+            FAIL,
+            "bridge server not registered in ~/.claude.json",
+        )
+    command = entry.get("command", "")
+    problem = _unresolvable_command(command, which)
+    if problem:
+        return ("Claude MCP registration", FAIL, problem)
+    return ("Claude MCP registration", OK, f"~/.claude.json ({command})")
 
 
-def _check_codex_registration(codex_home: Path) -> tuple[str, str, str]:
+def _check_legacy_claude_registration(claude_home: Path) -> tuple[str, str, str] | None:
+    path = claude_legacy_settings_path(claude_home)
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text())
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict) or "bridge" not in data.get("mcpServers", {}):
+        return None
+    return (
+        "Claude MCP registration (legacy)",
+        WARN,
+        "stale entry in settings.json; run `bridge install`",
+    )
+
+
+def _check_codex_registration(
+    codex_home: Path, which: Callable[[str], str | None] = shutil.which
+) -> tuple[str, str, str]:
     path = codex_config_path(codex_home)
     if not path.exists():
         return ("Codex MCP registration", WARN, "config.toml missing; run `bridge install`")
     text = path.read_text()
-    if "[mcp_servers.bridge]" in text:
-        return ("Codex MCP registration", OK, "config.toml")
-    return ("Codex MCP registration", FAIL, "bridge server not registered")
+    if "[mcp_servers.bridge]" not in text:
+        return ("Codex MCP registration", FAIL, "bridge server not registered")
+    command = _codex_registered_command(text)
+    problem = _unresolvable_command(command, which)
+    if problem:
+        return ("Codex MCP registration", FAIL, problem)
+    return ("Codex MCP registration", OK, f"config.toml ({command})")
+
+
+def _codex_registered_command(text: str) -> str:
+    """The ``command = "..."`` value inside the bridge TOML table, or ``""``."""
+    _, _, rest = text.partition("[mcp_servers.bridge]")
+    for line in rest.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("["):
+            break
+        if stripped.startswith("command"):
+            _, _, raw = stripped.partition("=")
+            try:
+                value = json.loads(raw.strip())
+            except json.JSONDecodeError:
+                return ""
+            return value if isinstance(value, str) else ""
+    return ""
 
 
 def _channel_mode_check(probe: Callable[[], ChannelMode] | None) -> tuple[str, str, str]:
@@ -182,8 +257,6 @@ def _policy_check(paths: Paths) -> tuple[str, str, str]:
     """Surface any persisted ``policy_error`` from known sessions' session.json
     (written by the Claude Channel adapter when Claude does not negotiate the
     channel capability). Token-free: reads only what is already on disk."""
-    import json
-
     sessions_dir = paths.sessions_dir
     if not sessions_dir.exists():
         return ("Claude channel policy", OK, "no managed sessions recorded")
