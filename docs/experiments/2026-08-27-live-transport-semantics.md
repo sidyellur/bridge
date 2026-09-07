@@ -103,7 +103,7 @@ confirm it appears in that conversation and elicits `reply(call_id, ...)`. Repea
 while the session is mid-turn to observe busy behavior. Capture any
 research-preview allowlist or organization-policy errors verbatim.
 
-Verdict: TBD (requires live Claude session + human observer)
+Verdict: PASS — 2026-09-07 run 20260907T035740Z, claude 2.1.263 launched via bridge claude --dangerously-load-development-channels server:bridge. Human observed in the exact idle session: '← bridge: [bridge call] call_id: 407e1a9e-…' rendered inline, Claude called the reply tool in that conversation ('Called bridge'), reply accepted, no files changed / no commands run. Wire (E.jsonl): notifications/claude/channel {content, meta:{kind:call, call_id}} out at 03:59:18, tools/call reply with the same call_id in at 03:59:31 (13s), answered_by=live-session. Handshake record: client claude-code 2.1.263, client capabilities roots+elicitation only (no claude/channel client cap) — no allowlist/organization-policy warning reported. Python MCP server suffices; no TypeScript SDK needed. (run: docs/experiments/runs/20260907T035740Z)
 
 ---
 
@@ -120,7 +120,7 @@ unix://…`; connect a second Bridge client; identify the thread from
 `item/agent_message*`, and `turn/completed`; determine whether the final message
 reliably maps to the started turn.
 
-Verdict: TBD (requires live Codex session + human observer)
+Verdict: FAIL — 2026-09-07 run 20260907T035740Z, codex-cli 0.151.0: bridge codex crashed at initialize with JsonRpcError: connection closed. Reproduced by hand (App Server stderr empty): (1) TRANSPORT — codex app-server --listen unix://PATH speaks WebSocket over the Unix socket (HTTP Upgrade → 'HTTP/1.1 101 Switching Protocols'); a raw newline-JSON line is closed silently. Bridge sends JSONL, which only stdio:// accepts. (2) SCHEMA — over stdio Bridge's initialize is accepted but the result is {userAgent, codexHome, platformFamily, platformOs} with no protocolVersion/serverInfo/capabilities, so CodexAppServerClient.initialize would raise UnsupportedCodexVersion; the real protocol (docs + codex app-server generate-json-schema, 98 client methods) is camelCase (threadId, item/agentMessage/delta) and initialize takes clientInfo{name,title,version} only. Bridge's pinned codex-app-server/1 fixture was assumed, not recorded. Shared-App-Server semantics could not be tested. Follow-up: rework the Codex adapter (WebSocket-over-AF_UNIX client, fixture regenerated from the real schema) and re-run F. (run: docs/experiments/runs/20260907T035740Z)
 
 ---
 
@@ -133,7 +133,7 @@ active turn serialized (queued until idle) with no accidental `turn/steer`?
 vendor queues it natively or the adapter must buffer until an idle notification.
 Prove no steer occurs.
 
-Verdict: TBD (requires live Claude+Codex sessions + human observer)
+Verdict: PASS — CLAUDE HALF (2026-09-07 run 20260907T035740Z, claude 2.1.263): human started a ~30s essay turn; lab delivered a [bridge text] at 04:04:48 mid-turn. Observed: the essay streamed to 'Worked for 30s · done' untouched; only then did '← bridge: [bridge text] from: bridge-lab …' render and Claude open a short follow-up turn: 'Noted … informational only, so no reply was sent and no action was taken.' No steer. Note: Bridge itself cannot hold for Claude — Claude Code sends the channel server no busy/turn signal (only initialize/initialized/tools/list/tools/call), so held_while_busy=false and the harness's ok=false are by construction; the no-steer guarantee for Claude rests on Claude Code's own channel queueing, which held. CODEX HALF: pending. (run: docs/experiments/runs/20260907T035740Z)
 
 ---
 
