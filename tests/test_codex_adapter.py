@@ -24,6 +24,7 @@ from bridge.codex_app_server import (
     SYSTEM_ERROR_MESSAGE,
     CodexAppServerClient,
 )
+from bridge.mcp import INVALID_REQUEST, JsonRpcError
 from bridge.store import Store
 
 from .fakes.codex_app_server import FakeCodexAppServer
@@ -47,6 +48,7 @@ def codex_factory(paths):
         resume_result="ok",
         codex_version=PINNED_CODEX_VERSION,
         eager_thread=True,
+        turn_start_error=None,
     ):
         client_sock, server_sock = socket.socketpair()
         server = FakeCodexAppServer(
@@ -57,6 +59,7 @@ def codex_factory(paths):
             auto_complete=auto_complete,
             resume_result=resume_result,
             eager_thread=eager_thread,
+            turn_start_error=turn_start_error,
         )
         app = CodexAppServerClient(client_sock, cwd=CWD).start()
         adapter = CodexAdapter(
@@ -167,6 +170,7 @@ def test_session_meta_records_thread_id_subscribed_and_codex_version(codex_facto
     assert _wait_subscribed(server)
     assert _wait(lambda: _meta(paths, "codex-1").get("subscribed") is True)
     meta = _meta(paths, "codex-1")
+    assert meta["family"] == "codex"
     assert meta["thread_id"] == THREAD
     assert meta["subscribed"] is True
     assert meta["codex_version"] == "0.151.0"
@@ -220,6 +224,32 @@ def test_working_status_holds_delivery(codex_factory):
     time.sleep(0.3)
     assert len(server.turns) == before  # held while working
     assert server.forbidden_calls == []
+
+
+def test_a_turn_start_error_never_kills_the_router_reader(codex_factory, paths):
+    """A `turn/start` refusal is routine on a live server (an unknown thread
+    after a TUI restart, `Not initialized` on a replacement connection) and
+    escapes as a JsonRpcError. `RouterClient._read_loop` survives only OSError,
+    so letting one through would kill the subscription while the roster still
+    advertised the session as reachable and idle: every later delivery would
+    vanish. Nothing may reach that thread."""
+    rr, make = codex_factory
+    adapter, server = make(
+        "codex-1", turn_start_error=JsonRpcError(INVALID_REQUEST, "no rollout found")
+    )
+    adapter.start()
+    caller = rr.client(session_id="claude-1")
+    assert _wait_reachable(caller, "codex-1")
+
+    caller.call("text", {"to": "codex-1", "message": "first"})
+    assert _wait(lambda: len(server.turns) == 1)
+    assert adapter.router._reader.is_alive()
+
+    # The reader is not merely alive: it still routes. A second delivery lands.
+    caller.call("text", {"to": "codex-1", "message": "second"})
+    assert _wait(lambda: len(server.turns) == 2)
+    assert adapter.router._reader.is_alive()
+    assert _wait(lambda: "no rollout found" in _meta(paths, "codex-1").get("last_thread_error", ""))
 
 
 def test_system_error_status_records_the_error_and_stays_idle(codex_factory, paths):

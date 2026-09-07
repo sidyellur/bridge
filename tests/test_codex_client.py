@@ -36,13 +36,14 @@ from bridge.codex_app_server import (
     SERVER_NOTIFICATIONS,
     STATUS_IDLE,
     STATUS_WORKING,
+    THREAD_STATUS_ACTIVE,
     THREAD_STATUS_TO_STATE,
     CodexAppServerClient,
     CodexThreadBusy,
     UnsupportedCodexVersion,
     parse_codex_version,
 )
-from bridge.mcp import INTERNAL_ERROR, JsonRpcError
+from bridge.mcp import INTERNAL_ERROR, METHOD_NOT_FOUND, JsonRpcError
 
 from .fakes.codex_app_server import FakeCodexAppServer
 
@@ -268,6 +269,29 @@ def test_bind_returns_none_when_there_are_no_candidates(client_pair):
     assert rec.bound == []
 
 
+def test_bind_tolerates_a_thread_list_error_and_still_binds_from_the_broadcast(client_pair):
+    """Discovery is best-effort. A ``thread/loaded/list`` refusal used to raise
+    straight out of ``adapter.start()`` and tear the wrapper down with a raw
+    JsonRpcError, contradicting the warn-never-hard-fail policy above the pin —
+    and needlessly, because the global ``thread/started`` broadcast binds the
+    TUI thread anyway."""
+    client, fake, rec = client_pair(
+        eager_thread=False,
+        client_cwd="/work/mine",
+        thread_list_error=JsonRpcError(METHOD_NOT_FOUND, "thread/loaded/list is unsupported"),
+    )
+    client.initialize()
+
+    assert client.bind_thread() is None
+    assert client.thread_id is None
+    assert "unsupported" in (client.last_thread_error or "")
+    assert rec.bound == []
+
+    fake.start_thread("t-mine", "/work/mine")
+    assert _wait(lambda: client.thread_id == "t-mine")
+    assert rec.bound == ["t-mine"]
+
+
 def test_a_thread_started_broadcast_after_connect_binds(client_pair):
     client, fake, rec = client_pair(eager_thread=False, client_cwd="/work/mine")
     client.initialize()
@@ -413,6 +437,31 @@ def test_start_turn_uses_camel_case_and_returns_result_turn_id(client_pair):
         "threadId": fake.thread_id,
         "input": [{"type": "text", "text": "hi"}],
     }
+
+
+def test_start_turn_is_optimistically_working_before_the_active_broadcast(client_pair):
+    """The live server answers ``turn/start`` and only then broadcasts
+    ``thread/status/changed active``. Gating the second turn on that broadcast
+    leaves a window the router's pump walks straight through — it drains every
+    queued text back-to-back — so two turns would overlap on one thread. Bridge
+    must consider the thread working the moment the response lands."""
+    client, fake, _rec = client_pair(auto_complete=False, defer_turn_status=True)
+    _bound(client, fake)
+
+    client.start_turn("first")
+    assert client.status == STATUS_WORKING  # no status frame has arrived yet
+
+    with pytest.raises(CodexThreadBusy, match="never queues a second turn"):
+        client.start_turn("second")
+    assert len(fake.turns) == 1
+
+    # The server's own frames stay authoritative in both directions.
+    fake.emit_status(THREAD_STATUS_ACTIVE)
+    _sync(client)
+    assert client.status == STATUS_WORKING
+    fake.complete_turn()
+    _sync(client)
+    assert client.status == STATUS_IDLE
 
 
 def test_start_turn_refuses_while_working(client_pair):

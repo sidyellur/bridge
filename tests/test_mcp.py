@@ -8,7 +8,7 @@ import threading
 import time
 
 from bridge.mcp import Framing, JsonRpcError, RpcEndpoint
-from bridge.ws import recv_message, server_handshake
+from bridge.ws import WebSocketError, recv_message, server_handshake
 
 
 def test_jsonl_request_bytes_are_unchanged():
@@ -438,3 +438,95 @@ def test_request_after_reader_death_fails_fast():
         assert elapsed < 1.0, f"waited {elapsed:.2f}s instead of failing fast"
     finally:
         endpoint.close()
+
+
+def test_ws_client_handshake_times_out_instead_of_blocking_forever():
+    """A peer that accepts the connection and never upgrades used to hang
+    `start()` forever inside `_read_headers`' one-byte recv, taking
+    `bridge codex` down with it and printing no diagnostic at all."""
+    client_sock, peer = socket.socketpair()
+    endpoint = RpcEndpoint(
+        client_sock, name="c", framing=Framing.WS_CLIENT, handshake_timeout=0.2
+    )
+    try:
+        started = time.monotonic()
+        try:
+            endpoint.start()
+        except WebSocketError as exc:
+            elapsed = time.monotonic() - started
+            assert "handshake timed out" in str(exc)
+        else:
+            raise AssertionError("start() returned against a peer that never upgraded")
+        assert elapsed < 2.0, f"waited {elapsed:.2f}s"
+    finally:
+        endpoint.close()
+        peer.close()
+
+
+def test_a_completed_ws_client_handshake_leaves_the_socket_blocking():
+    """The reader thread's recv must not inherit the handshake timeout: an idle
+    connection would tear itself down a few seconds in."""
+    client_sock, server_sock = socket.socketpair()
+    server = RpcEndpoint(server_sock, name="server", framing=Framing.WS_SERVER)
+    server.start()
+    client = RpcEndpoint(
+        client_sock, name="client", framing=Framing.WS_CLIENT, handshake_timeout=5.0
+    )
+    try:
+        client.start()
+        assert client_sock.gettimeout() is None
+    finally:
+        client.close()
+        server.close()
+
+
+def test_a_reader_crash_reports_the_close_like_any_other_teardown():
+    """Only the transport errors used to be caught in the read loop, so anything
+    else -- here a malformed `error` member, which `_handle_response` indexes as
+    a mapping -- escaped with `unexpected` still False: `on_close` never fired,
+    so the App Server adapter never learned the connection was gone and never
+    reconnected. Every exit must be the same teardown.
+
+    (The in-flight request is popped by `_handle_response` before it crashes, so
+    it waits out its own timeout rather than being failed by `_fail_pending` --
+    a separate wrinkle, ledgered, not what this covers.)
+    """
+    client, peer = socket.socketpair()
+    close_calls = []
+    endpoint = RpcEndpoint(client, name="a", on_close=lambda: close_calls.append(1)).start()
+    # A response only reaches `_handle_response` when it matches a pending
+    # request, so the crash needs one in flight; its own short timeout is what
+    # releases this thread.
+    inflight = threading.Thread(target=lambda: _swallow(endpoint, timeout=0.5))
+    inflight.start()
+    try:
+        peer.recv(65536)  # the request is on the wire
+        peer.sendall(b'{"id":1,"error":"boom"}\n')
+
+        for _ in range(200):
+            if close_calls:
+                break
+            threading.Event().wait(0.01)
+        assert close_calls == [1], "a crashed reader never reported the close"
+
+        # And the endpoint is properly torn down, not merely reported: a request
+        # issued afterwards fails fast instead of waiting out its timeout.
+        started = time.monotonic()
+        try:
+            endpoint.request("m", timeout=5.0)
+        except JsonRpcError as exc:
+            assert "connection closed" in exc.message
+        else:
+            raise AssertionError("request on a dead endpoint returned instead of raising")
+        assert time.monotonic() - started < 1.0
+    finally:
+        inflight.join(timeout=5)
+        endpoint.close()
+        peer.close()
+
+
+def _swallow(endpoint: RpcEndpoint, *, timeout: float) -> None:
+    try:
+        endpoint.request("m", timeout=timeout)
+    except JsonRpcError:
+        pass

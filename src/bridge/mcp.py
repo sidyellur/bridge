@@ -68,8 +68,14 @@ class RpcEndpoint:
         framing: Framing = Framing.JSONL,
         include_jsonrpc: bool = True,
         on_parse_error: Callable[[bytes], None] | None = None,
+        handshake_timeout: float = 10.0,
     ) -> None:
         self._sock = sock
+        # Bounds the synchronous WS_CLIENT handshake only: a peer that accepts
+        # the connection and never upgrades would otherwise block start() (and
+        # `bridge codex` with it) forever inside a one-byte recv. JSONL never
+        # handshakes, so it never touches the socket timeout.
+        self._handshake_timeout = handshake_timeout
         self._name = name
         self._on_close = on_close
         self._framing = framing
@@ -103,7 +109,19 @@ class RpcEndpoint:
             # surfacing only as a silent reader-thread close.
             from . import ws
 
-            ws.client_handshake(self._sock)
+            previous = self._sock.gettimeout()
+            self._sock.settimeout(self._handshake_timeout)
+            try:
+                ws.client_handshake(self._sock)
+            except TimeoutError as exc:
+                raise ws.WebSocketError(
+                    f"websocket handshake timed out after {self._handshake_timeout}s"
+                ) from exc
+            finally:
+                # Restored before the reader thread starts: a blocking socket is
+                # what recv_message() expects, and a leftover timeout would turn
+                # an idle connection into a spurious teardown.
+                self._sock.settimeout(previous)
         self._thread.start()
         return self
 
@@ -171,11 +189,8 @@ class RpcEndpoint:
                 pass
 
     def _read_loop(self) -> None:
-        exc_types: tuple[type[BaseException], ...] = (OSError,)
         if self._framing is not Framing.JSONL:
             from . import ws
-
-            exc_types = (OSError, ws.WebSocketError)
         unexpected = False
         try:
             if self._framing is Framing.WS_SERVER:
@@ -207,7 +222,12 @@ class RpcEndpoint:
                         unexpected = not self._closed
                         break
                     self._handle_line(payload)
-        except exc_types:
+        except Exception:  # noqa: BLE001
+            # Every exit is the same teardown. Catching only the transport
+            # errors here let anything else (a malformed "error" member, a bug
+            # in a handler) escape with `unexpected` still False: pendings were
+            # failed by `finally` but `on_close` never fired, so nothing
+            # reconnected and the connection died silently.
             unexpected = not self._closed
         finally:
             self._fail_pending()

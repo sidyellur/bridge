@@ -147,6 +147,9 @@ class CodexAdapter:
         if self.paths is None:
             return
         meta: dict[str, Any] = {
+            # Explicit so `bridge doctor`'s handshake check, which reads a
+            # missing family as Claude, is safe by construction.
+            "family": "codex",
             "thread_id": self.app.thread_id or "",
             "subscribed": bool(self.app.subscribed),
             "codex_version": self.app.codex_version,
@@ -222,6 +225,17 @@ class CodexAdapter:
             # the ack leaves it delivered-but-unacked: it comes back only when
             # `redeliver_inflight` replays it on the adapter's next router
             # reconnect. Explicitly re-queuing it instead is a follow-up.
+            return
+        except Exception as exc:  # noqa: BLE001
+            # This runs on RouterClient's reader thread, which only survives
+            # OSError/ConnectionClosed: anything escaping here (a `turn/start`
+            # JsonRpcError for an unknown thread, a dead App Server, a bug)
+            # would silently kill the subscription while the roster still shows
+            # the session reachable. Nothing may ever reach that thread. No ack,
+            # so the message stays delivered-unacked exactly like the busy path.
+            detail = f"turn/start failed: {exc}"
+            self.app.last_thread_error = detail
+            self._submit(self._write_session_meta)
             return
         if kind in ("text", "call_result") and event.get("message_id"):
             mid = event["message_id"]

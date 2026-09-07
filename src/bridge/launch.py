@@ -277,6 +277,28 @@ def run_wrapper(
 # --- codex: App Server owner + adapter + remote TUI -------------------------
 
 
+def connect_codex_client(socket_path, *, timeout: float = 0.5):
+    """Connect one client to the App Server socket, or leave nothing behind.
+
+    A short per-attempt timeout: a dead App Server refuses the connection
+    immediately (ECONNREFUSED), so this bounds how long one of ``CodexAdapter``'s
+    own backed-off attempts can take, not whether a live server gets time to
+    answer. The cwd is how ``bind_thread()`` picks the TUI's thread out of every
+    thread the App Server has loaded, so a replacement client needs it just as
+    much as the first one.
+    """
+    from .codex_app_server import CodexAppServerClient, connect_app_server_socket
+
+    sock = connect_app_server_socket(socket_path, timeout=timeout)
+    try:
+        return CodexAppServerClient(sock, cwd=os.getcwd()).start()
+    except Exception:
+        # start() failing (a handshake that never completes) leaves nothing
+        # holding this fd; a retrying reconnect loop would leak one per attempt.
+        sock.close()
+        raise
+
+
 def _run_codex_wrapper(
     user_args: Sequence[str],
     *,
@@ -297,11 +319,7 @@ def _run_codex_wrapper(
     session is registered/reachable, *then* attach the remote TUI. Tears down
     in reverse order on exit, reaping both children."""
     from .adapters.codex import CodexAdapter
-    from .codex_app_server import (
-        CodexAppServerClient,
-        CodexAppServerProcess,
-        connect_app_server_socket,
-    )
+    from .codex_app_server import CodexAppServerClient, CodexAppServerProcess
 
     session_id = new_id()
     paths.ensure_session_dir(session_id)
@@ -319,15 +337,7 @@ def _run_codex_wrapper(
         raise
 
     def _reconnect() -> CodexAppServerClient:
-        # A short per-attempt timeout: a dead App Server refuses the
-        # connection immediately (ECONNREFUSED), so this bounds how long one
-        # of CodexAdapter's own backed-off attempts can take, not whether a
-        # live server gets time to answer.
-        sock = connect_app_server_socket(socket_path, timeout=0.5)
-        # The cwd is how bind_thread() picks the TUI's thread out of every
-        # thread the App Server has loaded, so the replacement client needs it
-        # just as much as the first one.
-        return CodexAppServerClient(sock, cwd=os.getcwd()).start()
+        return connect_codex_client(socket_path)
 
     def _print_disconnect_diagnostic() -> None:
         print(

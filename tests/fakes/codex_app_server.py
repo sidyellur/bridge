@@ -57,6 +57,9 @@ class FakeCodexAppServer:
         auto_complete: bool = True,
         resume_result: str = "ok",
         eager_thread: bool = True,
+        turn_start_error: JsonRpcError | None = None,
+        thread_list_error: JsonRpcError | None = None,
+        defer_turn_status: bool = False,
         now_ms: Callable[[], int] | None = None,
     ) -> None:
         self.codex_version = codex_version
@@ -66,6 +69,16 @@ class FakeCodexAppServer:
         self.auto_complete = auto_complete
         self.resume_result = resume_result
         self.eager_thread = eager_thread
+        # Error knobs: a real server refuses `turn/start` for an unknown thread
+        # (a restarted TUI) and can refuse `thread/loaded/list` outright. Set to
+        # a JsonRpcError to answer that method with it instead of succeeding.
+        self.turn_start_error = turn_start_error
+        self.thread_list_error = thread_list_error
+        # This fake answers `turn/start` *after* its own `active` broadcast,
+        # which the live server does not: it responds first and broadcasts a
+        # moment later. Set this to leave the `active` frame to the test, so a
+        # client that leaned on the broadcast to know it is busy is visible.
+        self.defer_turn_status = defer_turn_status
         self._now_ms = now_ms or (lambda: int(time.time() * 1000))
 
         self.initialize_params: dict | None = None
@@ -173,6 +186,8 @@ class FakeCodexAppServer:
 
     def _thread_loaded_list(self, _params: dict) -> dict:
         self._require_initialized()
+        if self.thread_list_error is not None:
+            raise self.thread_list_error
         with self._lock:
             return {"data": [t["id"] for t in self.threads], "nextCursor": None}
 
@@ -218,14 +233,20 @@ class FakeCodexAppServer:
 
     def _turn_start(self, params: dict) -> dict:
         self._require_initialized()
-        thread_id = params.get("threadId", self.thread_id)
+        # Recorded before the refusal branch: `turns` is every `turn/start` the
+        # client sent, which is what a test about refused turns has to count.
         with self._lock:
             self.turns.append(params)
+        if self.turn_start_error is not None:
+            raise self.turn_start_error
+        thread_id = params.get("threadId", self.thread_id)
+        with self._lock:
             self._turn_n += 1
             turn_id = f"turn-{self._turn_n}"
             self._last_turn_id = turn_id
 
-        self.emit_status(THREAD_STATUS_ACTIVE, [])
+        if not self.defer_turn_status:
+            self.emit_status(THREAD_STATUS_ACTIVE, [])
         self._notify_subscribed(
             N_TURN_STARTED,
             {"threadId": thread_id, "turn": self._turn_obj(turn_id, "inProgress")},

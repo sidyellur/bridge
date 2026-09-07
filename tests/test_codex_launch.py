@@ -211,6 +211,7 @@ def test_session_meta_is_written_for_a_wrapped_codex_session(paths, codex_bin, i
                     return {}
 
             assert _wait_for(lambda: meta().get("thread_id") == "thread-fake")
+            assert meta()["family"] == "codex"
             assert meta()["subscribed"] is True
             assert meta()["codex_version"] == "0.151.0"
         finally:
@@ -381,3 +382,37 @@ def test_unsupported_app_server_version_stops_app_server_and_spawns_no_tui(paths
     # No TUI was ever spawned (the adapter failed its handshake first), and
     # the App Server was still stopped/reaped rather than left running.
     assert not capture.exists() or not read_captures(capture)
+
+
+def test_reconnect_factory_closes_the_socket_when_the_client_cannot_start(tmp_path, monkeypatch):
+    """`CodexAdapter` retries this factory on a backoff, so a client that fails
+    to start (a handshake the App Server never completes) must not leave its
+    connected socket for the garbage collector: five attempts would leak five
+    fds against an App Server that is up but wedged."""
+    import socket as socket_mod
+
+    from bridge import codex_app_server, launch
+
+    sockets: list = []
+
+    class FailingClient:
+        def __init__(self, sock, **_kwargs) -> None:
+            sockets.append(sock)
+
+        def start(self):
+            raise OSError("handshake never completed")
+
+    monkeypatch.setattr(codex_app_server, "CodexAppServerClient", FailingClient)
+
+    socket_path = tmp_path / "app.sock"
+    listener = socket_mod.socket(socket_mod.AF_UNIX, socket_mod.SOCK_STREAM)
+    listener.bind(str(socket_path))
+    listener.listen(1)
+    try:
+        with pytest.raises(OSError, match="handshake never completed"):
+            launch.connect_codex_client(socket_path)
+    finally:
+        listener.close()
+
+    assert len(sockets) == 1
+    assert sockets[0].fileno() == -1, "the connected socket was left open"

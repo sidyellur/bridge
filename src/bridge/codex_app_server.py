@@ -188,6 +188,7 @@ class CodexAppServerClient:
         )
         self.thread_id: str | None = None
         self.status: str = STATUS_IDLE
+        self._status_seq = 0
         self.subscribed = False
         self.codex_version = ""
         self.codex_version_warning: str | None = None
@@ -262,7 +263,16 @@ class CodexAppServerClient:
     def bind_thread(self) -> str | None:
         """Find and bind the thread the remote TUI owns. Issues requests, so it
         belongs to the main thread or the adapter's worker — never a handler."""
-        data = self.rpc.request(M_THREAD_LIST, {}).get("data") or []
+        try:
+            listing = self.rpc.request(M_THREAD_LIST, {})
+        except JsonRpcError as exc:
+            # Discovery is best-effort, never fatal above the pin: a server that
+            # refuses the listing (an older/newer build, `Not initialized` on a
+            # replacement connection) still binds us through the global
+            # `thread/started` broadcast seconds later.
+            self.last_thread_error = exc.message
+            return self.thread_id
+        data = (listing.get("data") if isinstance(listing, Mapping) else None) or []
         candidates: list[dict[str, Any]] = []
         for thread_id in data:
             try:
@@ -271,7 +281,7 @@ class CodexAppServerClient:
                 )
             except JsonRpcError:
                 continue
-            thread = result.get("thread")
+            thread = result.get("thread") if isinstance(result, Mapping) else None
             if isinstance(thread, Mapping) and thread.get("id") not in self.own_thread_ids:
                 candidates.append(dict(thread))
         if not candidates:
@@ -323,11 +333,23 @@ class CodexAppServerClient:
             raise CodexThreadBusy(
                 f"thread {self.thread_id} is working; Bridge never queues a second turn"
             )
+        seq = self._status_seq
         result = self.rpc.request(
             M_TURN_START,
             {"threadId": self.thread_id, "input": [{"type": "text", "text": text}]},
         )
-        return str((result.get("turn") or {}).get("id") or "")
+        # Optimistically working: the real server answers `turn/start` first and
+        # only then broadcasts `thread/status/changed active`, so waiting for
+        # that frame leaves a window in which the pump's next queued message
+        # passes the busy gate and overlaps two turns on one thread. The server's
+        # own `active` confirms this, and its `idle` clears it. A server that
+        # ordered its status frames *before* the response has already told us
+        # the truth (possibly already `idle` again for an instant turn), so the
+        # optimism only applies when nothing was reported during the call.
+        if self._status_seq == seq:
+            self._set_status(STATUS_WORKING)
+        turn = result.get("turn") if isinstance(result, Mapping) else None
+        return str((turn or {}).get("id") or "")
 
     def final_message(self, turn_id: str) -> str | None:
         """The completed agent message for ``turn_id``, deltas as the fallback."""
@@ -375,6 +397,10 @@ class CodexAppServerClient:
         self._set_status(THREAD_STATUS_TO_STATE[status_type])
 
     def _set_status(self, state: str) -> None:
+        # Counts every status the connection has reported, changed or not, so
+        # `start_turn` can tell "the server said nothing while I waited" from
+        # "the server already told me where this thread stands".
+        self._status_seq += 1
         if state == self.status:
             return
         self.status = state
