@@ -1,19 +1,29 @@
-"""Minimal JSON-RPC 2.0 endpoint over a newline-delimited byte stream.
+"""Minimal JSON-RPC 2.0 endpoint over newline-JSON or RFC 6455 text frames.
 
-This is the transport shared by the Claude Channel adapter and the Codex MCP
-tool server. MCP's stdio transport is newline-delimited JSON-RPC; an
-:class:`RpcEndpoint` can simultaneously answer requests, receive notifications,
-send requests, and push notifications, which is what a two-way channel needs.
+This is the transport shared by the Claude Channel adapter, the Bridge MCP
+server, and the router protocol. An :class:`RpcEndpoint` can simultaneously
+answer requests, receive notifications, send requests, and push notifications,
+which is what a two-way channel needs. ``Framing.JSONL`` (newline-delimited
+JSON) is the default and is what MCP stdio and Bridge's router protocol use;
+``Framing.WS_CLIENT``/``Framing.WS_SERVER`` speak RFC 6455 text frames instead,
+for ``codex app-server --listen unix://``.
 """
 
 from __future__ import annotations
 
+import enum
 import json
 import os
 import socket
 import threading
 from collections.abc import Callable, Mapping
 from typing import Any
+
+
+class Framing(enum.Enum):
+    JSONL = "jsonl"
+    WS_CLIENT = "ws-client"
+    WS_SERVER = "ws-server"
 
 
 class JsonRpcError(Exception):
@@ -55,10 +65,16 @@ class RpcEndpoint:
         name: str = "",
         on_close: Callable[[], None] | None = None,
         on_frame: FrameHook | None = None,
+        framing: Framing = Framing.JSONL,
+        include_jsonrpc: bool = True,
+        on_parse_error: Callable[[bytes], None] | None = None,
     ) -> None:
         self._sock = sock
         self._name = name
         self._on_close = on_close
+        self._framing = framing
+        self._include_jsonrpc = include_jsonrpc
+        self._on_parse_error = on_parse_error
         # Opt-in `bridge lab` wire capture. Unset -> a single dict lookup and no
         # hook, so the endpoint pays nothing and writes nothing.
         if on_frame is None and os.environ.get("BRIDGE_LAB_CAPTURE"):
@@ -78,6 +94,12 @@ class RpcEndpoint:
         self._thread = threading.Thread(target=self._read_loop, daemon=True, name=f"rpc-{name}")
 
     def start(self) -> RpcEndpoint:
+        if self._framing is Framing.WS_CLIENT:
+            # Synchronous so a handshake failure raises to the caller instead of
+            # surfacing only as a silent reader-thread close.
+            from . import ws
+
+            ws.client_handshake(self._sock)
         self._thread.start()
         return self
 
@@ -107,36 +129,74 @@ class RpcEndpoint:
             raise pending.error
         return pending.result
 
-    def notify(self, method: str, params: dict[str, Any] | None = None) -> None:
-        self._send({"jsonrpc": "2.0", "method": method, "params": params or {}})
+    def notify(
+        self,
+        method: str,
+        params: dict[str, Any] | None = None,
+        *,
+        extra: Mapping[str, Any] | None = None,
+        omit_empty_params: bool = False,
+    ) -> None:
+        envelope: dict[str, Any] = {"jsonrpc": "2.0", "method": method}
+        if not (omit_empty_params and not params):
+            envelope["params"] = params or {}
+        envelope.update(extra or {})
+        self._send(envelope)
 
     # --- internals ----------------------------------------------------------
     def _send(self, obj: dict[str, Any]) -> None:
+        if not self._include_jsonrpc:
+            obj = {k: v for k, v in obj.items() if k != "jsonrpc"}
         if self._on_frame is not None:
             self._on_frame(self._name, "out", obj)
-        data = json.dumps(obj, separators=(",", ":")).encode("utf-8") + b"\n"
+        data = json.dumps(obj, separators=(",", ":")).encode("utf-8")
         with self._send_lock:
             try:
-                self._sock.sendall(data)
+                if self._framing is Framing.JSONL:
+                    self._sock.sendall(data + b"\n")
+                else:
+                    from . import ws
+
+                    ws.send_text(self._sock, data, mask=self._framing is Framing.WS_CLIENT)
             except OSError:
                 pass
 
     def _read_loop(self) -> None:
+        exc_types: tuple[type[BaseException], ...] = (OSError,)
+        if self._framing is not Framing.JSONL:
+            from . import ws
+
+            exc_types = (OSError, ws.WebSocketError)
+            if self._framing is Framing.WS_SERVER:
+                # Runs here, not in start(), so a server endpoint can be
+                # constructed and start()ed before its peer connects, instead of
+                # blocking the caller's constructor on the handshake.
+                ws.server_handshake(self._sock)
         unexpected = False
         try:
-            while not self._closed:
-                chunk = self._sock.recv(65536)
-                if not chunk:
-                    unexpected = not self._closed
-                    break
-                self._buf.extend(chunk)
-                while b"\n" in self._buf:
-                    line, _, rest = self._buf.partition(b"\n")
-                    self._buf = bytearray(rest)
-                    line = line.strip()
-                    if line:
-                        self._handle_line(bytes(line))
-        except OSError:
+            if self._framing is Framing.JSONL:
+                while not self._closed:
+                    chunk = self._sock.recv(65536)
+                    if not chunk:
+                        unexpected = not self._closed
+                        break
+                    self._buf.extend(chunk)
+                    while b"\n" in self._buf:
+                        line, _, rest = self._buf.partition(b"\n")
+                        self._buf = bytearray(rest)
+                        line = line.strip()
+                        if line:
+                            self._handle_line(bytes(line))
+            else:
+                while not self._closed:
+                    payload = ws.recv_message(
+                        self._sock, require_mask=self._framing is Framing.WS_SERVER
+                    )
+                    if payload is None:
+                        unexpected = not self._closed
+                        break
+                    self._handle_line(payload)
+        except exc_types:
             unexpected = not self._closed
         finally:
             self._fail_pending()
@@ -150,9 +210,14 @@ class RpcEndpoint:
         try:
             msg = json.loads(line)
         except json.JSONDecodeError:
+            if self._on_parse_error is not None:
+                self._on_parse_error(line)
             return
         if self._on_frame is not None:
             self._on_frame(self._name, "in", msg)
+        # Dispatch keys only on "method"/"id", so a response missing "jsonrpc"
+        # and a notification carrying extra keys (e.g. "emittedAtMs") are
+        # handled by construction.
         if "method" in msg and "id" in msg:
             self._handle_request(msg)
         elif "method" in msg:
