@@ -13,9 +13,10 @@ Plan: `docs/superpowers/plans/2026-08-26-bridge-v1-plan.md` Task 1
 > installed versions, and output here.
 >
 > The adapters in `src/bridge/` are written against the documented contracts
-> (`tests/fixtures/codex_protocol/v1.json` pins the Codex side) and are covered
-> by hermetic contract tests. These experiments validate that those contracts
-> match the real vendors before the `-m live` suites are trusted.
+> (`tests/fixtures/codex_protocol/codex-0.151.0.json` pins the Codex side) and
+> are covered by hermetic contract tests. These experiments validate that
+> those contracts match the real vendors before the `-m live` suites are
+> trusted.
 
 ## How to run
 
@@ -84,8 +85,8 @@ Capture notes:
 * Each `bridge lab run X` writes the frames it observed plus a summary record to
   `<run>/X.jsonl`. Cite that path in the verdict.
 
-`bridge lab` never issues `turn/steer`, never resumes a session, and never
-writes a verdict of its own.
+`bridge lab` never issues `turn/steer`, `turn/interrupt`, or `review/start`,
+never resumes a session, and never writes a verdict of its own.
 
 ---
 
@@ -103,7 +104,7 @@ confirm it appears in that conversation and elicits `reply(call_id, ...)`. Repea
 while the session is mid-turn to observe busy behavior. Capture any
 research-preview allowlist or organization-policy errors verbatim.
 
-Verdict: TBD (requires live Claude session + human observer)
+Verdict: PASS — 2026-09-07 run 20260907T035740Z, claude 2.1.263 launched via bridge claude --dangerously-load-development-channels server:bridge. Human observed in the exact idle session: '← bridge: [bridge call] call_id: 407e1a9e-…' rendered inline, Claude called the reply tool in that conversation ('Called bridge'), reply accepted, no files changed / no commands run. Wire (E.jsonl): notifications/claude/channel {content, meta:{kind:call, call_id}} out at 03:59:18, tools/call reply with the same call_id in at 03:59:31 (13s), answered_by=live-session. Handshake record: client claude-code 2.1.263, client capabilities roots+elicitation only (no claude/channel client cap) — no allowlist/organization-policy warning reported. Python MCP server suffices; no TypeScript SDK needed. (run: docs/experiments/runs/20260907T035740Z)
 
 ---
 
@@ -120,7 +121,7 @@ unix://…`; connect a second Bridge client; identify the thread from
 `item/agent_message*`, and `turn/completed`; determine whether the final message
 reliably maps to the started turn.
 
-Verdict: TBD (requires live Codex session + human observer)
+Verdict: PASS — 2026-09-07 run 20260907T211003Z, codex-cli 0.151.0, session a2a82f02 via bridge codex (App Server over WebSocket unix://, TUI attached with codex --remote). SHARED CONTROL: Bridge bound the TUI's thread 01a07ddc from the global thread/started broadcast (threadSource=user, non-ephemeral; an earlier run showed Codex spawning an ephemeral threadSource=system side-thread after a user turn, which Bridge must ignore and now does), issued turn/start on it while idle (response turn id 01a07ddd-3ddd-…), and the human observed the [bridge text] appear as a turn in the exact displayed conversation with Codex replying 'Acknowledged.' Bridge's MCP tool server inside Codex started cleanly once the session identity was passed via -c mcp_servers.bridge.env overrides (Codex scrubs env for MCP subprocesses). LIMITATION (documented, not a Bridge fault): thread/resume on the TUI thread is refused by 0.151.0 (-32600 no rollout found / -32601 list_turns not supported), so turn/started, item/*, and turn/completed never reach Bridge for that thread — busy/idle still arrives via the global thread/status/changed; the final-agent-message reply fallback therefore cannot be correlated on 0.151.0 and stays disabled; call replies rely on Codex invoking Bridge's reply tool. (run: docs/experiments/runs/20260907T211003Z)
 
 ---
 
@@ -133,7 +134,7 @@ active turn serialized (queued until idle) with no accidental `turn/steer`?
 vendor queues it natively or the adapter must buffer until an idle notification.
 Prove no steer occurs.
 
-Verdict: TBD (requires live Claude+Codex sessions + human observer)
+Verdict: PASS — BOTH HALVES. CLAUDE (2026-09-07 run 20260907T035740Z, claude 2.1.263): human started a ~30s essay turn; lab delivered a [bridge text] mid-turn; the essay streamed to 'done' untouched, then the '← bridge:' line rendered and Claude opened a short follow-up turn treating it as informational. Bridge itself cannot hold for Claude — Claude Code sends the channel server no busy/turn signal (only initialize/initialized/tools/list/tools/call), so held_while_busy=false by construction; the no-steer guarantee for Claude rests on Claude Code's own channel queueing, which held. CODEX (2026-09-07 run 20260907T220317Z, codex-cli 0.151.0, session d7332c00 bound to thread 01a07de6): human started a ~35s essay turn; the roster reported working via the global thread/status/changed broadcast; lab delivered a text → admission 'queued' (held while busy: True); the text was delivered after idle; zero turn/steer, turn/interrupt, or review/start frames sent by Bridge. Human observed: the essay finished uninterrupted and only then did the [bridge lab] Experiment G text appear in the Codex TUI. (An earlier attempt in run 20260907T211003Z reported 9 forbidden frames — all from the test suite's fake endpoints leaking into the shared capture via an ambient BRIDGE_LAB_CAPTURE; fixed by fencing the env var in conftest and scanning only Bridge-sent frames.) (run: docs/experiments/runs/20260907T220317Z)
 
 ---
 
@@ -146,4 +147,4 @@ restarted one at a time?
 **Procedure.** Kill/restart each component in turn; record how the roster's
 `reachable`, queued call deadlines, and re-binding of the Bridge address behave.
 
-Verdict: TBD (requires live Claude+Codex sessions + human observer)
+Verdict: PASS — 2026-09-07 run 20260907T220317Z (claude 2.1.263, codex-cli 0.151.0). Lab driven from a headless terminal; human performed each action. kill-claude-channel: reachable=False within 60s (session/disconnected + session/offline). restart-claude with --session-id 61aecdb1: reachable=True (session/registered) - the same identity returns. kill-codex-app-server: reachable=False (session/offline + session/disconnected). restart-codex-tui: reachable=True for the OLD id 2f09cb88 = False - the relaunched wrapper registered a NEW id ec283dbe because 'bridge codex' has no --session-id (known product gap: Codex session identity across TUI restarts; not a reachability-tracking fault). kill-router: the lab's own router connection dropped as expected. Findings during H: (1) 'bridge claude --session-id X' failed with 'unrecognized arguments' - argparse REMAINDER dropped a leading option; fixed in cli.py. (2) The router stalled on any response over 8 KB (macOS AF_UNIX SO_SNDBUF): RouterServer._flush never re-armed EVENT_WRITE after a partial send, so 'transcript limit=100' hung once the table passed ~45 rows and the harness died with a 65s timeout; worked around by pruning, fixed in router.py with a regression test. No steer/interrupt frames. Evidence: docs/experiments/runs/20260907T220317Z/H.jsonl (run: docs/experiments/runs/20260907T220317Z)

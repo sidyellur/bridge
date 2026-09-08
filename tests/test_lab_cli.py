@@ -2,20 +2,22 @@
 
 Everything here is hermetic: fake ``claude``/``codex`` executables, an injected
 doctor report, fake Claude Channel host / Codex App Server peers behind a real
-``RouterServer``, a scripted prompter instead of ``input()``, and a temporary
-copy of the experiments document. The *real* document is only ever read -- one
-test asserts it still says ``TBD``, because a verdict may only be written by a
+``RouterServer``, a scripted prompter instead of ``input()``, and a synthetic
+experiments-document fixture (never the real file). The *real* document is
+only ever read -- one test asserts its four ``Verdict:`` lines are well-formed
+(TBD, or PASS/FAIL with a run reference) and that ``lab_report`` agrees with
+whatever the file currently says, because a verdict may only be written by a
 human who ran the procedure.
 """
 
 from __future__ import annotations
 
 import json
-import shutil
 import socket
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -42,8 +44,56 @@ from .fakes.codex_app_server import FakeCodexAppServer
 from .fakes.executables import make_capture_exe
 from .fakes.router_peer import RunningRouter
 
+CODEX_CWD = "/tmp/peer"
 DOCS = Path(__file__).resolve().parent.parent / "docs" / "experiments"
 REAL_DOC = DOCS / "2026-08-27-live-transport-semantics.md"
+
+# A synthetic stand-in for the real experiments document: same section/
+# heading/verdict-line shape ``lab_verdict`` and ``lab_report`` match against
+# (see ``_section_bounds``/``find_verdict_line`` in ``bridge.lab.cli``), but
+# with content the tests own outright -- never coupled to the live document's
+# real-world resolution state.
+SYNTHETIC_DOC_TEXT = """\
+# Live-transport experiments E-H (test fixture)
+
+### Running with `bridge lab`
+
+This is a synthetic stand-in for the real experiments document, used only to
+exercise `bridge lab verdict`/`bridge lab report` in tests.
+
+## Experiment E — Claude Channel delivery and reply
+
+**Question.** Does an event delivered over a Claude development Channel reach
+the exact idle session?
+
+Verdict: TBD (requires live Claude session + human observer)
+
+---
+
+## Experiment F — Codex App Server shared control
+
+**Question.** Can a Bridge client and a remote Codex TUI share one App Server?
+
+Verdict: TBD (requires live Codex session + human observer)
+
+---
+
+## Experiment G — Busy-session serialization
+
+**Question.** Is an inbound call delivered during an unrelated active turn
+serialized with no accidental `turn/steer`?
+
+Verdict: TBD (requires live Claude+Codex sessions + human observer)
+
+---
+
+## Experiment H — Lifecycle and reconnect
+
+**Question.** How do session ids, reachability, queued deadlines, and
+resumption behave across restarts?
+
+Verdict: TBD (requires live Claude+Codex sessions + human observer)
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -96,7 +146,7 @@ def fake_vendor_env(tmp_path: Path) -> dict[str, str]:
 def temp_doc(tmp_path: Path) -> Path:
     dest = tmp_path / "doc" / REAL_DOC.name
     dest.parent.mkdir(parents=True)
-    shutil.copyfile(REAL_DOC, dest)
+    dest.write_text(SYNTHETIC_DOC_TEXT, encoding="utf-8")
     return dest
 
 
@@ -123,15 +173,23 @@ def _make_claude(rr, paths, session_id, *, auto_reply=None):
     return adapter, host
 
 
-def _make_codex(rr, session_id, *, auto_complete=True):
+def _make_codex(rr, session_id, *, auto_complete=True, resume_result="ok"):
     client_sock, server_sock = socket.socketpair()
-    server = FakeCodexAppServer(server_sock, auto_complete=auto_complete)
-    app = CodexAppServerClient(client_sock).start()
+    server = FakeCodexAppServer(
+        server_sock, cwd=CODEX_CWD, auto_complete=auto_complete, resume_result=resume_result
+    )
+    app = CodexAppServerClient(client_sock, cwd=CODEX_CWD).start()
     adapter = CodexAdapter(session_id, app)
     adapter.connect_router(
         lambda on_event: rr.client(session_id=session_id, role="adapter", on_event=on_event)
     )
     adapter.start()
+    # `turn/*`/`item/*` are subscriber-only; the adapter does not subscribe
+    # itself yet (Task 5), so F/G would see no turn frames without this.
+    deadline = time.time() + 3.0
+    while time.time() < deadline and not app.thread_id:
+        time.sleep(0.02)
+    app.subscribe()
     return adapter, server
 
 
@@ -340,6 +398,7 @@ def test_run_f_correlates_turn_started_to_turn_completed(paths, run_dir):
     assert summary["correlated"], summary
     assert summary["correlated"][0] in summary["started"]
     assert summary["correlated"][0] in summary["completed"]
+    assert summary["correlated"][0] in summary["items"]
     assert summary["turn_start_requests"] >= 1
 
 
@@ -367,20 +426,93 @@ def test_run_f_fails_when_the_turn_never_completes(paths, run_dir):
     assert summary["started"]  # the turn did start
     assert summary["completed"] == []  # it never completed
     assert summary["correlated"] == []
+    assert summary["items"]  # the user-message item still landed
 
 
-def test_correlate_turns_pairs_ids_through_the_response():
+def test_run_f_reports_no_correlation_when_the_subscription_was_refused(paths, run_dir):
+    out = Out()
+    with RunningRouter(paths) as rr:
+        adapter, server = _make_codex(rr, "codex-1", resume_result="unsupported")
+        try:
+            ctrl = rr.client(session_id="ctrl")
+            assert _wait_reachable(ctrl, "codex-1", state="idle")
+            rc = lab_run(
+                "F",
+                run_dir=run_dir,
+                codex_id="codex-1",
+                timeout_s=0.5,
+                connect=lambda: rr.client(session_id="bridge-lab"),
+                out=out,
+            )
+        finally:
+            adapter.close()
+            server.close()
+
+    assert rc == 1
+    summary = _summary(run_dir, "F")
+    # 0.151.0 refuses `thread/resume` for the live TUI thread: no turn/*
+    # or item/* notification ever reaches Bridge, but the turn is still
+    # admitted -- this is the honest 0.151.0 verdict, not a Bridge bug.
+    assert summary["started"] == []
+    assert summary["items"] == []
+    assert summary["correlated"] == []
+    assert summary["admission_status"] in ("queued", "delivered")
+
+
+def test_correlate_turns_pairs_ids_through_the_result_turn_object():
     records = [
-        {"frame": {"jsonrpc": "2.0", "id": 7, "method": "turn/start", "params": {}}},
-        {"frame": {"jsonrpc": "2.0", "id": 7, "result": {"turn_id": "turn-1"}}},
-        {"frame": {"jsonrpc": "2.0", "method": "turn/started", "params": {"turn_id": "turn-1"}}},
-        {"frame": {"jsonrpc": "2.0", "method": "turn/completed", "params": {"turn_id": "turn-1"}}},
-        {"frame": {"jsonrpc": "2.0", "method": "turn/started", "params": {"turn_id": "other"}}},
+        {"frame": {"id": 7, "method": "turn/start", "params": {}}},
+        {
+            "frame": {
+                "id": 7,
+                "result": {"turn": {"id": "01a07a20", "status": "inProgress", "items": []}},
+            }
+        },
+        {"frame": {"method": "turn/started", "params": {"turn": {"id": "01a07a20"}}}},
+        {"frame": {"method": "turn/completed", "params": {"turn": {"id": "01a07a20"}}}},
+        {"frame": {"method": "turn/started", "params": {"turn": {"id": "other"}}}},
     ]
     result = correlate_turns(records)
-    assert result["turn_ids"] == ["turn-1"]
-    assert result["correlated"] == ["turn-1"]
+    assert result["turn_ids"] == ["01a07a20"]
+    assert result["correlated"] == ["01a07a20"]
     assert "other" in result["started"]
+
+
+def test_correlate_turns_collects_item_turn_ids():
+    records = [
+        {
+            "frame": {
+                "method": "item/started",
+                "params": {"threadId": "t1", "turnId": "01a07a20", "item": {}},
+            }
+        },
+        {
+            "frame": {
+                "method": "item/agentMessage/delta",
+                "params": {"threadId": "t1", "turnId": "01a07a20", "delta": "hi"},
+            }
+        },
+        {
+            "frame": {
+                "method": "item/completed",
+                "params": {"threadId": "t1", "turnId": "01a07a20", "item": {}},
+            }
+        },
+    ]
+    result = correlate_turns(records)
+    assert result["items"] == ["01a07a20"]
+
+
+def test_correlate_turns_ignores_legacy_turn_id_frames():
+    records = [
+        {"frame": {"method": "turn/started", "params": {"turn_id": "legacy"}}},
+        {"frame": {"method": "turn/completed", "params": {"turn_id": "legacy"}}},
+    ]
+    result = correlate_turns(records)
+    assert result["started"] == []
+    assert result["completed"] == []
+    assert result["correlated"] == []
+    assert result["items"] == []
 
 
 # ---------------------------------------------------------------------------
@@ -389,6 +521,16 @@ def test_correlate_turns_pairs_ids_through_the_response():
 
 
 def test_run_g_holds_while_working_delivers_on_idle_and_sees_no_steer(paths, run_dir):
+    # A forbidden-method frame from a non-Bridge source (the fake peer itself,
+    # or an unrelated test endpoint) must never count against G -- only a
+    # frame Bridge's own endpoints *sent* does.
+    wire = run_dir / capture.CAPTURE_FILENAME
+    writer = capture.CaptureWriter(wire)
+    writer.on_frame(
+        "fake-codex-app-server", "in", {"jsonrpc": "2.0", "id": 1, "method": "turn/steer"}
+    )
+    writer.on_frame("left", "out", {"jsonrpc": "2.0", "id": 2, "method": "turn/interrupt"})
+
     out = Out()
     with RunningRouter(paths) as rr:
         adapter, server = _make_codex(rr, "codex-1")
@@ -396,7 +538,7 @@ def test_run_g_holds_while_working_delivers_on_idle_and_sees_no_steer(paths, run
             ctrl = rr.client(session_id="ctrl")
             assert _wait_reachable(ctrl, "codex-1", state="idle")
 
-            server.emit_status("working")
+            server.emit_status("active")
             deadline = time.time() + 3.0
             while time.time() < deadline:
                 entry = next(s for s in ctrl.call("roster", {})["sessions"] if s["id"] == "codex-1")
@@ -429,7 +571,7 @@ def test_run_g_holds_while_working_delivers_on_idle_and_sees_no_steer(paths, run
     assert summary["delivered_on_idle"] is True
     assert summary["steer_frames"] == 0
     assert server.forbidden_calls == []
-    assert "no turn/steer frame in the capture" in out.text
+    assert "no turn/steer frame sent by Bridge" in out.text
 
 
 def test_run_g_hard_fails_on_any_turn_steer_frame(paths, run_dir):
@@ -444,7 +586,7 @@ def test_run_g_hard_fails_on_any_turn_steer_frame(paths, run_dir):
         try:
             ctrl = rr.client(session_id="ctrl")
             assert _wait_reachable(ctrl, "codex-1", state="idle")
-            server.emit_status("working")
+            server.emit_status("active")
             releaser = threading.Timer(0.4, lambda: server.emit_status("idle"))
             releaser.start()
             try:
@@ -464,8 +606,35 @@ def test_run_g_hard_fails_on_any_turn_steer_frame(paths, run_dir):
             server.close()
 
     assert rc == 1
-    assert "turn/steer" in out.text
+    assert "FAIL: 1 forbidden frame(s) sent by Bridge" in out.text
     assert _summary(run_dir, "G")["steer_frames"] == 1
+
+
+def test_steer_scan_ignores_frames_from_non_bridge_sources(tmp_path):
+    """``_steer_frames`` counts only ``turn/steer``-family frames that Bridge's
+    own endpoints *sent* (direction ``out``, source in ``bridge_sources()``) --
+    not any forbidden method that merely appears somewhere in a shared
+    capture, regardless of who wrote it or which direction it went."""
+    from bridge.lab.cli import _steer_frames
+
+    wire = tmp_path / capture.CAPTURE_FILENAME
+    writer = capture.CaptureWriter(wire)
+    # A fake peer's own outbound `turn/steer` (inbound to Bridge) is not
+    # Bridge steering anything.
+    writer.on_frame(
+        "fake-codex-app-server", "in", {"jsonrpc": "2.0", "id": 1, "method": "turn/steer"}
+    )
+    # An arbitrary non-Bridge endpoint name used by unrelated tests.
+    writer.on_frame("left", "out", {"jsonrpc": "2.0", "id": 2, "method": "turn/steer"})
+
+    ctx = SimpleNamespace(tail=capture.CaptureTail(wire))
+    assert _steer_frames(ctx) == []
+
+    # The real thing: Bridge's own codex-app-server endpoint sending it out.
+    writer.on_frame(
+        "codex-app-server", "out", {"jsonrpc": "2.0", "id": 3, "method": "turn/steer"}
+    )
+    assert len(_steer_frames(ctx)) == 1
 
 
 def test_run_g_targets_the_explicit_claude_id_even_with_a_reachable_codex_session(paths, run_dir):
@@ -544,7 +713,7 @@ def test_run_g_auto_picks_codex_and_announces_it_when_neither_is_explicit(paths,
             ctrl = rr.client(session_id="ctrl")
             assert _wait_reachable(ctrl, "codex-1", state="idle")
 
-            server.emit_status("working")
+            server.emit_status("active")
             deadline = time.time() + 3.0
             while time.time() < deadline:
                 entry = next(s for s in ctrl.call("roster", {})["sessions"] if s["id"] == "codex-1")
@@ -788,13 +957,31 @@ def test_report_notices_a_missing_verdict_line(tmp_path):
     assert "expected exactly 4" in out.text
 
 
-def test_the_real_document_is_untouched_and_still_tbd():
+def test_the_real_document_has_one_verdict_line_per_experiment_and_report_reflects_it():
     """The harness must never fabricate a verdict: only a human who ran the
-    procedure on live sessions may resolve one."""
-    out = Out()
-    assert lab_report(doc=REAL_DOC, out=out) == 1
+    procedure on live sessions may resolve one, and a resolved line must carry
+    a run reference proving it. This test tracks whatever the live document
+    currently says (TBD or resolved) rather than assuming a fixed state."""
     text = REAL_DOC.read_text()
-    assert text.count("Verdict: TBD") == 4
+    verdict_lines = [ln for ln in text.splitlines() if ln.startswith("Verdict:")]
+    assert len(verdict_lines) == 4
+
+    for name, line in zip(EXPERIMENTS, verdict_lines, strict=True):
+        assert (
+            line.startswith("Verdict: TBD")
+            or line.startswith("Verdict: PASS —")
+            or line.startswith("Verdict: FAIL —")
+        ), f"Experiment {name}: unexpected verdict line {line!r}"
+        if not line.startswith("Verdict: TBD"):
+            assert "docs/experiments/runs/" in line or "(run: " in line, (
+                f"Experiment {name}: resolved verdict has no run reference: {line!r}"
+            )
+
+    any_tbd = any(line.startswith("Verdict: TBD") for line in verdict_lines)
+    expected_rc = 1 if any_tbd else 0
+
+    out = Out()
+    assert lab_report(doc=REAL_DOC, out=out) == expected_rc
     assert find_repo_root(REAL_DOC.parent) == REAL_DOC.resolve().parents[2]
     # ... and the harness is documented there, without touching those lines.
     assert "Running with `bridge lab`" in text
@@ -814,12 +1001,44 @@ def test_cli_registers_bridge_lab(temp_doc, capsys):
     assert "bridge lab {prepare,run,verdict,report}" in capsys.readouterr().out
 
 
-def test_lab_only_ever_watches_for_the_forbidden_method():
+def test_lab_only_ever_watches_for_the_forbidden_methods():
     from bridge.codex_app_server import FORBIDDEN_METHODS
     from bridge.lab import cli as lab_cli
 
     assert lab_cli.FORBIDDEN_FRAME_METHODS == FORBIDDEN_METHODS
     source = Path(lab_cli.__file__).read_text()
-    # `turn/steer` appears only in the forbidden-method constant the lab scans
-    # a capture for -- the lab never sends one.
-    assert source.count('"turn/steer"') == 1
+    # The lab never names a forbidden method itself: it scans a capture for the
+    # client module's tuple, so no method literal appears here at all.
+    for method in FORBIDDEN_METHODS:
+        assert f'"{method}"' not in source
+
+
+def test_no_legacy_codex_wire_names_remain():
+    repo_root = Path(__file__).resolve().parent.parent
+    legacy_patterns = ('"turn_id"', "runtime/status", "codex-app-server/1", "item/agent_message")
+    # `"thread_id"` is also a name from the invented v1 contract, but Bridge's
+    # own session-meta schema (adapters/codex.py, its tests) legitimately uses
+    # that same spelling for an unrelated, non-wire field -- this plan does not
+    # touch that file, so it is excluded rather than mistaken for a wire name.
+    thread_id_allowlist = {
+        repo_root / "src" / "bridge" / "adapters" / "codex.py",
+        repo_root / "tests" / "test_codex_adapter.py",
+        repo_root / "tests" / "test_codex_launch.py",
+    }
+    # This test necessarily quotes every pattern it looks for (to build the
+    # legacy-shaped sample records above and to name the patterns themselves).
+    self_path = Path(__file__).resolve()
+    offenders: list[str] = []
+    for base in (repo_root / "src", repo_root / "tests"):
+        for path in base.rglob("*"):
+            if path.suffix not in (".py", ".json") or not path.is_file():
+                continue
+            if "docs" in path.relative_to(repo_root).parts or path == self_path:
+                continue
+            text = path.read_text(encoding="utf-8")
+            for pattern in legacy_patterns:
+                if pattern in text:
+                    offenders.append(f"{path}: {pattern}")
+            if '"thread_id"' in text and path not in thread_id_allowlist:
+                offenders.append(f'{path}: "thread_id"')
+    assert offenders == []

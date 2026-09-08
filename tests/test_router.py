@@ -166,3 +166,39 @@ def test_internal_error_does_not_kill_loop(running_router: RunningRouter):
         c.call("register_session", {"family": "claude"})  # missing session_id
     # loop still alive, subsequent op works
     assert "sessions" in c.call("roster", {})
+
+
+def test_large_transcript_response_completes_over_socket_buffer_limit(
+    running_router: RunningRouter,
+):
+    # macOS AF_UNIX sockets default to an 8192-byte SO_SNDBUF. A `transcript`
+    # response with enough rows comfortably exceeds that in one encoded JSONL
+    # frame, so a partial `send()` must be re-armed for EVENT_WRITE and
+    # finished on a later writable event rather than left stuck in `outbound`
+    # forever (see router.py `_flush`).
+    store = running_router.server.router.store
+    for i in range(300):
+        store.record_event(
+            "call",
+            "delivered",
+            from_id="a",
+            to_id="b",
+            gist="x" * 100 + str(i),
+        )
+
+    c = running_router.client(session_id="a")
+    resp = c.call("transcript", {"limit": 500}, timeout=5)
+    assert len(resp["entries"]) == 300
+
+
+def test_large_roster_response_completes_over_socket_buffer_limit(
+    running_router: RunningRouter,
+):
+    c = running_router.client(session_id="a")
+    for i in range(200):
+        c.call(
+            "register_session",
+            {"session_id": f"s{i}", "family": "claude", "cwd": f"/w/{i}", "state": "idle"},
+        )
+    resp = c.call("roster", {}, timeout=5)
+    assert len(resp["sessions"]) >= 200

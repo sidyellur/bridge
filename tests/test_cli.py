@@ -87,3 +87,23 @@ def test_text_with_source_sends(cli_env, capsys, monkeypatch):
         rc = cli_text("b", "heads up")
         assert rc == 1
         assert "unreachable" in capsys.readouterr().out
+
+
+def test_launch_wrappers_forward_a_leading_option(monkeypatch):
+    from bridge import cli
+
+    seen: dict[str, list[str]] = {}
+
+    def fake_claude(args):
+        seen["claude"] = list(args)
+        return 0
+
+    def fake_codex(args):
+        seen["codex"] = list(args)
+        return 0
+
+    monkeypatch.setattr("bridge.launch.cli_launch_claude", fake_claude)
+    monkeypatch.setattr("bridge.launch.cli_launch_codex", fake_codex)
+    assert cli.main(["claude", "--session-id", "abc", "--resume", "x"]) == 0
+    assert cli.main(["codex", "--model", "o3"]) == 0
+    assert seen == {"claude": ["--session-id", "abc", "--resume", "x"], "codex": ["--model", "o3"]}

@@ -22,3 +22,6 @@ htmlcov/
 
 # Subagent worktrees (ephemeral, never commit)
 .claude/worktrees/
+
+# SDD / research scratch (never commit)
+.superpowers/

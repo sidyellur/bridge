@@ -15,6 +15,7 @@ import pytest
 
 import bridge
 from bridge.cli import main
+from bridge.lab.capture import CAPTURE_ENV, CAPTURE_FULL_ENV
 from bridge.paths import Paths
 from bridge.protocol import FrameBuffer, decode_frame, encode_frame
 
@@ -57,6 +58,21 @@ def test_default_paths_resolution_never_reaches_the_real_bridge_home(tmp_path: P
     resolved = Paths.resolve()
     assert tmp_path in resolved.home.parents
     assert resolved.home != Path.home() / ".bridge"
+
+
+def test_lab_capture_env_is_fenced_out_of_every_test(tmp_path: Path):
+    """Proof of the ``BRIDGE_LAB_CAPTURE`` fence (the autouse
+    ``_no_real_bridge_home`` fixture in ``tests/conftest.py``): whatever a
+    developer's outer shell has exported, neither variable is visible from
+    inside a test. This is the direct guard against the real incident -- a
+    shell with wire capture exported for a live ``bridge lab`` run had a test
+    suite pass through it and append ~2,500 test frames into the live
+    capture's ``wire.jsonl`` -- because ``RpcEndpoint``/``RouterServer`` read
+    ``os.environ`` directly (see ``bridge/mcp.py``, ``bridge/router.py``), not
+    an injected value, so nothing short of clearing the process environment
+    itself closes the gap."""
+    assert os.environ.get(CAPTURE_ENV) is None
+    assert os.environ.get(CAPTURE_FULL_ENV) is None
 
 
 def test_paths_ensure_permissions(paths: Paths):

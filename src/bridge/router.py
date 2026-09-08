@@ -446,7 +446,7 @@ class _Conn:
 
     def queue(self, frame: dict[str, Any]) -> None:
         if self.on_frame is not None:
-            self.on_frame("router", "out", frame)
+            self.on_frame(FRAME_SOURCE, "out", frame)
         self.outbound.extend(encode_frame(frame))
 
 
@@ -473,6 +473,13 @@ class SocketNotifier:
             return
         conn.queue(ok_response(req_id, result))
         self._server.want_write(conn)
+
+
+#: The ``source`` a `bridge lab` capture records for every frame
+#: ``RouterServer`` hands to its ``on_frame`` hook. Named here so
+#: ``bridge.lab.cli`` can reference the real value instead of duplicating the
+#: ``"router"`` literal in :meth:`RouterServer._handle_frame`.
+FRAME_SOURCE = "router"
 
 
 class RouterServer:
@@ -631,16 +638,25 @@ class RouterServer:
             sent = conn.sock.send(conn.outbound)
             del conn.outbound[:sent]
         except BlockingIOError:
+            # The kernel send buffer is full right now (macOS AF_UNIX defaults
+            # to an 8 KB SO_SNDBUF); re-arm EVENT_WRITE so the selector wakes
+            # us again once there's room instead of leaving outbound stuck.
+            self.want_write(conn)
             return
         except OSError:
             self._close_conn(conn)
             return
-        if not conn.outbound:
+        if conn.outbound:
+            # Partial send: same 8 KB SO_SNDBUF limit mid-write. Re-arm
+            # EVENT_WRITE so _service flushes the remainder on the next
+            # writable event instead of it sitting in outbound forever.
+            self.want_write(conn)
+        else:
             self._sel.modify(conn.sock, selectors.EVENT_READ, data=conn)
 
     def _handle_frame(self, conn: _Conn, frame: dict[str, Any]) -> None:
         if self._on_frame is not None:
-            self._on_frame("router", "in", frame)
+            self._on_frame(FRAME_SOURCE, "in", frame)
         if frame.get("t") != "req":
             return
         req_id = frame.get("id")

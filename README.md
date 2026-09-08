@@ -98,11 +98,19 @@ bridge codex  [codex args...]
 channel: for every `bridge codex` invocation, the wrapper itself owns one
 Codex App Server for the lifetime of that session, in this order:
 
-1. Spawn `codex app-server --listen unix://~/.bridge/sessions/<id>/codex.sock`
-   and wait (bounded, with a clear error otherwise) for that socket to appear.
-2. Connect Bridge's own adapter to it — handshake, register with the router,
-   and subscribe to inbound events — so the session is **reachable before the
-   TUI ever attaches**.
+1. Spawn `codex app-server --listen unix://~/.bridge/sessions/<id>/codex.sock`,
+   adding `-c mcp_servers.bridge.env.*` overrides for the session's identity
+   so Codex's own MCP client can start Bridge's tool server (`bridge serve
+   --family codex`, from `~/.codex/config.toml`) with it — Codex does not
+   pass its environment through to the MCP servers it spawns — and wait
+   (bounded, with a clear error otherwise) for that socket to appear.
+2. Connect Bridge's own adapter to it over **WebSocket** (`codex app-server`
+   speaks RFC 6455 on that same Unix socket) — handshake, register with the
+   router, bind the exact thread the remote TUI creates, and best-effort
+   subscribe to it with `thread/resume` — so the session is **reachable
+   before the TUI ever attaches**. codex 0.151.0 refuses that subscription
+   for the live TUI thread, which costs Bridge the per-turn `item/*` stream
+   but not busy/idle.
 3. Launch the normal Codex TUI attached remotely: `codex --remote
    unix://…<same socket>`, forwarding your other arguments untouched.
 4. On exit, tear down in reverse: close the adapter, terminate the App Server
@@ -192,13 +200,17 @@ Bridge uses the vendors' live integration surfaces:
                       │     bridge router     │
                       │ registry / calls / DB │
                       └───────┬───────┬───────┘
-              channel event   │       │ App Server JSON-RPC
+              channel event   │       │ App Server JSON-RPC / WebSocket
                   Claude Channel     Codex App Server
                          │                   │
                   live Claude session   live Codex thread
                                              │
                                       `codex --remote ...`
 ```
+
+Bridge pins the App Server contract at codex 0.151.0
+(`tests/fixtures/codex_protocol/codex-0.151.0.json`) and warns, rather than
+fails, when a newer patch reports a higher version.
 
 A synchronous `call` blocks the caller's single tool request until the addressed
 session replies or the deadline passes; `call_async` returns immediately and the

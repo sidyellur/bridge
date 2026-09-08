@@ -1,16 +1,17 @@
 """Codex App Server adapter.
 
-Wires a router subscription to a :class:`CodexAppServerClient`: router events
-become idle ``turn/start`` deliveries in the exact bound thread, runtime/turn
-events are reflected back into the session's Bridge state, and — only when
-enabled by Experiment F — a turn that completes without an MCP ``reply`` yields
-its final agent message as a clearly-labeled fallback answer.
+Wires a router subscription to a :class:`CodexAppServerClient`: the adapter
+binds the thread the remote TUI already owns, subscribes to that thread,
+delivers router events into it as idle ``turn/start`` calls, reflects thread
+status back into the session's Bridge state, and records what it knows about
+the thread in the session's ``session.json`` for ``bridge doctor``.
 
-If the App Server RPC connection closes mid-session (a crash, not a deliberate
-``close()``), the adapter marks the session unreachable and records a
-transcript ``disconnected`` event rather than ever answering from a stale
-final message, then tries a small bounded-backoff reconnect so a transient
-restart of the same socket recovers without losing the Bridge session id.
+An App Server disconnect is not session death. The thread outlives the
+connection, so a crash (never a deliberate ``close()``) marks the session
+unreachable and records a transcript ``disconnected`` event, then a bounded
+backoff reconnect re-binds *the same thread* on the replacement connection —
+the Bridge session id, its router subscription, and the vendor thread id all
+survive.
 """
 
 from __future__ import annotations
@@ -22,10 +23,26 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from ..codex_app_server import STATUS_IDLE, CodexAppServerClient
+from ..codex_app_server import (
+    STATUS_IDLE,
+    TURN_STATUS_COMPLETED,
+    CodexAppServerClient,
+    CodexThreadBusy,
+)
+from ..paths import Paths
 
 
 class CodexAdapter:
+    """One wrapped Codex session's bridge between the router and its App Server.
+
+    Correlating a Bridge call with Codex's final agent message is proven, but
+    the ``turn/*``/``item/*`` stream it needs is subscriber-only and 0.151.0
+    usually refuses ``thread/resume`` for a live TUI thread. The reply path for
+    calls is therefore Codex invoking Bridge's ``reply`` MCP tool; the final
+    message is a clearly-labeled fallback, enabled only by Experiment F and
+    only ever available when :meth:`CodexAppServerClient.subscribe` succeeded.
+    """
+
     def __init__(
         self,
         session_id: str,
@@ -33,6 +50,7 @@ class CodexAdapter:
         *,
         final_message_fallback: bool = False,
         cwd: str | None = None,
+        paths: Paths | None = None,
         reconnect: Callable[[], CodexAppServerClient] | None = None,
         on_app_server_disconnect: Callable[[], None] | None = None,
         reconnect_attempts: int = 5,
@@ -42,8 +60,10 @@ class CodexAdapter:
         self.app = app_client
         self.fallback = final_message_fallback
         self.cwd = cwd or os.getcwd()
+        self.paths = paths
         self.router: Any = None
         self._active_call: str | None = None
+        self._final: dict[str, str] = {}
         # Builds and starts a replacement CodexAppServerClient bound to the
         # same socket path when the App Server connection drops unexpectedly.
         # None disables reconnect (the session simply stays unreachable).
@@ -57,12 +77,19 @@ class CodexAdapter:
         self._tasks: queue.Queue = queue.Queue()
         self._worker = threading.Thread(target=self._run_worker, daemon=True)
         self._worker_running = True
+        # A callback can fire while start() is still handshaking, and an
+        # update_state for a session the router has not registered yet is
+        # silently dropped. The worker waits for start() to finish its own
+        # router calls, which also keeps two threads off one router socket.
+        self._started = threading.Event()
         self._bind_app_callbacks(self.app)
 
     def _bind_app_callbacks(self, app: CodexAppServerClient) -> None:
         app._on_thread_bound = self._on_thread_bound
         app._on_status = self._on_status
+        app._on_agent_message = self._on_agent_message
         app._on_turn_completed = self._on_turn_completed
+        app._on_thread_error = self._on_thread_error
         app._on_disconnect = self._on_app_disconnected
 
     def connect_router(self, connect: Callable[[Callable[[dict[str, Any]], None]], Any]) -> None:
@@ -81,20 +108,21 @@ class CodexAdapter:
                 "is_managed": True,
             },
         )
-        if self.app.thread_id:
-            self.router.call(
-                "update_state",
-                {"session_id": self.session_id, "vendor_session_id": self.app.thread_id},
-            )
+        # Finding nothing is normal: a TUI thread appears seconds after the TUI
+        # attaches, and the `thread/started` broadcast binds it then.
+        self.app.bind_thread()
         self.router.subscribe(self.session_id)
         self.router.call(
             "update_state",
             {"session_id": self.session_id, "state": self.app.status or STATUS_IDLE},
         )
+        self._write_session_meta()
+        self._started.set()
         return self
 
     # --- worker -------------------------------------------------------------
     def _run_worker(self) -> None:
+        self._started.wait(30.0)
         while self._worker_running:
             task = self._tasks.get()
             if task is None:
@@ -107,28 +135,64 @@ class CodexAdapter:
     def _submit(self, fn: Callable[[], None]) -> None:
         self._tasks.put(fn)
 
+    def _update_state(self, updates: dict[str, Any]) -> None:
+        from ..router_client import RouterClientError
+
+        try:
+            self.router.call("update_state", {"session_id": self.session_id, **updates})
+        except RouterClientError:
+            pass
+
+    def _write_session_meta(self) -> None:
+        if self.paths is None:
+            return
+        meta: dict[str, Any] = {
+            # Explicit so `bridge doctor`'s handshake check, which reads a
+            # missing family as Claude, is safe by construction.
+            "family": "codex",
+            "thread_id": self.app.thread_id or "",
+            "subscribed": bool(self.app.subscribed),
+            "codex_version": self.app.codex_version,
+        }
+        if self.app.codex_version_warning:
+            meta["codex_version_warning"] = self.app.codex_version_warning
+        if self.app.last_thread_error:
+            meta["last_thread_error"] = self.app.last_thread_error
+        self.paths.merge_session_meta(self.session_id, meta)
+
     # --- App Server callbacks (App reader thread) ---------------------------
     def _on_thread_bound(self, thread_id: str) -> None:
-        self._submit(
-            lambda: self.router.call(
-                "update_state",
-                {"session_id": self.session_id, "vendor_session_id": thread_id},
-            )
-        )
+        # The single path for the initial bind and every rebind. It runs on the
+        # worker because subscribe() issues a request, which a notification
+        # handler on the App Server reader thread could never answer.
+        self._submit(lambda: self._bind_thread_task(thread_id))
+
+    def _bind_thread_task(self, thread_id: str) -> None:
+        self._update_state({"vendor_session_id": thread_id})
+        self.app.subscribe()
+        self._write_session_meta()
 
     def _on_status(self, status: str) -> None:
-        state = "idle" if status == STATUS_IDLE else "working"
-        self._submit(
-            lambda: self.router.call(
-                "update_state", {"session_id": self.session_id, "state": state}
-            )
-        )
+        # Already a Bridge state: the client maps thread status through
+        # THREAD_STATUS_TO_STATE before it calls back.
+        self._submit(lambda: self._update_state({"state": status}))
 
-    def _on_turn_completed(self, _turn_id: str, final_message: str) -> None:
+    def _on_thread_error(self, _detail: str) -> None:
+        # systemError maps to idle, so only the recorded detail changes here.
+        self._submit(self._write_session_meta)
+
+    def _on_agent_message(self, turn_id: str, text: str) -> None:
+        self._final[turn_id] = text
+
+    def _on_turn_completed(self, turn_id: str, status: str) -> None:
         call_id = self._active_call
         self._active_call = None
-        if call_id and self.fallback and final_message:
-            self._submit(lambda: self._fallback_reply(call_id, final_message))
+        # Both stores are evicted unconditionally, whichever one answers: a
+        # long-lived session must not accumulate every completed turn's text.
+        stored = self._final.pop(turn_id, "")
+        message = self.app.pop_final_message(turn_id) or stored
+        if call_id and self.fallback and status == TURN_STATUS_COMPLETED and message:
+            self._submit(lambda: self._fallback_reply(call_id, message))
 
     def _fallback_reply(self, call_id: str, message: str) -> None:
         from ..router_client import RouterClientError
@@ -147,7 +211,32 @@ class CodexAdapter:
         text = event.get("text", "")
         if kind == "call":
             self._active_call = event.get("call_id")
-        self.app.start_turn(text)
+        if self.app.thread_id is None:
+            # No thread bound yet. The router does not deliver to a session it
+            # has not seen go reachable, so this is a race, not a normal path.
+            return
+        try:
+            self.app.start_turn(text)
+        except CodexThreadBusy:
+            # The router's pump holds delivery while the session is `working`,
+            # so a refusal here is only ever a race with the status we have not
+            # reported yet. The message is already marked delivered by
+            # `delivery.pump_target` before this handler runs, so withholding
+            # the ack leaves it delivered-but-unacked: it comes back only when
+            # `redeliver_inflight` replays it on the adapter's next router
+            # reconnect. Explicitly re-queuing it instead is a follow-up.
+            return
+        except Exception as exc:  # noqa: BLE001
+            # This runs on RouterClient's reader thread, which only survives
+            # OSError/ConnectionClosed: anything escaping here (a `turn/start`
+            # JsonRpcError for an unknown thread, a dead App Server, a bug)
+            # would silently kill the subscription while the roster still shows
+            # the session reachable. Nothing may ever reach that thread. No ack,
+            # so the message stays delivered-unacked exactly like the busy path.
+            detail = f"turn/start failed: {exc}"
+            self.app.last_thread_error = detail
+            self._submit(self._write_session_meta)
+            return
         if kind in ("text", "call_result") and event.get("message_id"):
             mid = event["message_id"]
             self._submit(lambda: self._ack(mid))
@@ -172,20 +261,16 @@ class CodexAdapter:
         self._submit(self._handle_app_disconnected)
 
     def _handle_app_disconnected(self) -> None:
-        from ..router_client import RouterClientError
-
-        try:
-            self.router.call("update_state", {"session_id": self.session_id, "reachable": False})
-        except RouterClientError:
-            pass
+        self._update_state({"reachable": False})
         if self._reconnect is not None:
             self._try_reconnect()
 
     def _try_reconnect(self) -> bool:
         """Bounded-backoff reconnect to the same App Server socket, re-running
-        the initialize handshake on the replacement client. The Bridge session
-        id and the router subscription are untouched — only the App Server
-        connection dropped, so there is nothing to re-subscribe there."""
+        the initialize handshake and the bind on the replacement client. The
+        Bridge session id and the router subscription are untouched, and the
+        thread outlives the connection, so the same thread id is re-bound —
+        ``_on_thread_bound`` then re-subscribes it on this same worker."""
         from ..router_client import RouterClientError
 
         for attempt in range(self._reconnect_attempts):
@@ -197,6 +282,8 @@ class CodexAdapter:
                 self.app = new_app
                 self._bind_app_callbacks(self.app)
                 self.app.initialize()
+                self.app.own_thread_ids = set(old_app.own_thread_ids)
+                self.app.bind_thread()
             except Exception:  # noqa: BLE001
                 self._reconnect_sleep(min(0.1 * (2**attempt), 2.0))
                 continue
@@ -229,11 +316,13 @@ class CodexAdapter:
             except RouterClientError:
                 self._reconnect_sleep(min(0.1 * (2**attempt), 2.0))
                 continue
+            self._write_session_meta()
             return True
         return False
 
     def close(self) -> None:
         self._worker_running = False
+        self._started.set()
         self._tasks.put(None)
         self.app.close()
         if self.router is not None:

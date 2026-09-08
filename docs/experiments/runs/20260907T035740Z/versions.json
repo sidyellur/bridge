@@ -1,0 +1,88 @@
+{
+  "generated_at": "2026-09-07T03:57:40Z",
+  "bridge": "0.1.0",
+  "claude": {
+    "binary": "/Users/siddharthyellur/.local/bin/claude",
+    "version": "2.1.263 (Claude Code)"
+  },
+  "codex": {
+    "binary": "/opt/homebrew/bin/codex",
+    "version": "codex-cli 0.151.0"
+  },
+  "capture_full": false,
+  "doctor": {
+    "ok": true,
+    "checks": [
+      {
+        "name": "router home permissions",
+        "status": "ok",
+        "detail": "0o700"
+      },
+      {
+        "name": "router token permissions",
+        "status": "ok",
+        "detail": "0o600"
+      },
+      {
+        "name": "router socket",
+        "status": "ok",
+        "detail": "not listening (router idle)"
+      },
+      {
+        "name": "Claude MCP registration",
+        "status": "ok",
+        "detail": "~/.claude.json (/Users/siddharthyellur/bridge/.venv/bin/bridge)"
+      },
+      {
+        "name": "Codex MCP registration",
+        "status": "ok",
+        "detail": "config.toml (/Users/siddharthyellur/bridge/.venv/bin/bridge)"
+      },
+      {
+        "name": "Claude guidance",
+        "status": "ok",
+        "detail": "CLAUDE.md"
+      },
+      {
+        "name": "Codex guidance",
+        "status": "ok",
+        "detail": "AGENTS.md"
+      },
+      {
+        "name": "Claude Channel mode",
+        "status": "warn",
+        "detail": "research preview: --dangerously-load-development-channels server:bridge (claude 2.1.263 (Claude Code)); organization policy may still block inbound delivery"
+      },
+      {
+        "name": "Claude channel handshake",
+        "status": "ok",
+        "detail": "no managed sessions recorded"
+      },
+      {
+        "name": "claude binary",
+        "status": "ok",
+        "detail": "on PATH"
+      },
+      {
+        "name": "codex binary",
+        "status": "ok",
+        "detail": "on PATH"
+      },
+      {
+        "name": "no obsolete hooks/queue",
+        "status": "ok",
+        "detail": "clean"
+      },
+      {
+        "name": "loopback protocol probe",
+        "status": "ok",
+        "detail": "router idle; nothing to probe"
+      },
+      {
+        "name": "codex app-server liveness",
+        "status": "ok",
+        "detail": "no sessions recorded yet"
+      }
+    ]
+  }
+}

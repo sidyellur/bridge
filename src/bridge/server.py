@@ -21,6 +21,12 @@ from .tools import ANTI_RETRIEVAL, all_tools, dispatch_tool
 
 MCP_PROTOCOL_VERSION = "2024-11-05"
 
+#: The ``RpcEndpoint`` name this server registers under -- also the ``source``
+#: field a `bridge lab` capture records for every frame it sends/receives.
+#: Named here (not just an inline ``name="bridge-mcp"`` literal below) so
+#: ``bridge.lab.cli`` can reference the real value instead of duplicating it.
+RPC_ENDPOINT_NAME = "bridge-mcp"
+
 INSTRUCTIONS = (
     "Bridge coordinates live agent sessions. Tools: roster, call, call_async, "
     "text, transcript, and reply (only while handling an inbound call). " + ANTI_RETRIEVAL
@@ -31,7 +37,7 @@ class BridgeMCPServer:
     def __init__(self, session_id: str, host_sock: socket.socket, router: Any) -> None:
         self.session_id = session_id
         self.router = router
-        self.rpc = RpcEndpoint(host_sock, name="bridge-mcp")
+        self.rpc = RpcEndpoint(host_sock, name=RPC_ENDPOINT_NAME)
         self._register()
 
     def _register(self) -> None:

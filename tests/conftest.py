@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from bridge.lab.capture import CAPTURE_ENV, CAPTURE_FULL_ENV
 from bridge.paths import BRIDGE_HOME_ENV, Paths
 
 from .fakes.clock import FrozenClock
@@ -81,8 +82,20 @@ def running_router(paths: Paths, clock: FrozenClock, ids: SeededIds) -> Iterator
 @pytest.fixture(autouse=True)
 def _no_real_bridge_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Root every unset-``paths`` resolution in the test's temp dir, so a missing
-    injection can never touch the user's real ``~/.bridge``."""
+    injection can never touch the user's real ``~/.bridge``.
+
+    Also fences ``BRIDGE_LAB_CAPTURE``/``BRIDGE_LAB_CAPTURE_FULL``: those are
+    read straight off ``os.environ`` by ``RpcEndpoint``/``RouterServer``
+    (``bridge/mcp.py``, ``bridge/router.py``), so a developer shell that
+    happens to have wire capture exported for a real ``bridge lab`` run would
+    otherwise make every test-created endpoint append its frames into that
+    same live capture file. Tests that deliberately exercise capture set the
+    variable themselves via ``monkeypatch`` (see ``tests/test_lab_capture.py``
+    and the ``run_dir`` fixture in ``tests/test_lab_cli.py``), which happens
+    after this fixture runs and so is unaffected."""
     monkeypatch.setenv(BRIDGE_HOME_ENV, str(tmp_path / "resolved-bridge-home"))
+    monkeypatch.delenv(CAPTURE_ENV, raising=False)
+    monkeypatch.delenv(CAPTURE_FULL_ENV, raising=False)
 
 
 @pytest.fixture(autouse=True)

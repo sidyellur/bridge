@@ -19,6 +19,7 @@ import time
 import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 
 from .paths import (
     BRIDGE_HOME_ENV,
@@ -196,6 +197,7 @@ def run_wrapper(
     sleep: Callable[[float], None] = time.sleep,
     now: Callable[[], float] = time.time,
     codex_final_message_fallback: bool | None = None,
+    codex_home: Path | None = None,
 ) -> LaunchResult:
     from .registry import Registry
 
@@ -224,6 +226,9 @@ def run_wrapper(
         # Dropping any previous run's handshake keeps a resume honest.
         paths.merge_session_meta(session_id, {"family": "claude"}, drop=("handshake",))
     elif family == "codex":
+        resolved_codex_home = codex_home or (
+            Path(base_env.get("HOME", str(Path.home()))) / ".codex"
+        )
         return _run_codex_wrapper(
             user_args,
             paths=paths,
@@ -241,6 +246,7 @@ def run_wrapper(
                 if codex_final_message_fallback is not None
                 else codex_final_message_fallback_enabled(base_env)
             ),
+            codex_home=resolved_codex_home,
         )
     else:
         raise ValueError(f"unknown family {family!r}")
@@ -277,6 +283,28 @@ def run_wrapper(
 # --- codex: App Server owner + adapter + remote TUI -------------------------
 
 
+def connect_codex_client(socket_path, *, timeout: float = 0.5):
+    """Connect one client to the App Server socket, or leave nothing behind.
+
+    A short per-attempt timeout: a dead App Server refuses the connection
+    immediately (ECONNREFUSED), so this bounds how long one of ``CodexAdapter``'s
+    own backed-off attempts can take, not whether a live server gets time to
+    answer. The cwd is how ``bind_thread()`` picks the TUI's thread out of every
+    thread the App Server has loaded, so a replacement client needs it just as
+    much as the first one.
+    """
+    from .codex_app_server import CodexAppServerClient, connect_app_server_socket
+
+    sock = connect_app_server_socket(socket_path, timeout=timeout)
+    try:
+        return CodexAppServerClient(sock, cwd=os.getcwd()).start()
+    except Exception:
+        # start() failing (a handshake that never completes) leaves nothing
+        # holding this fd; a retrying reconnect loop would leak one per attempt.
+        sock.close()
+        raise
+
+
 def _run_codex_wrapper(
     user_args: Sequence[str],
     *,
@@ -291,17 +319,15 @@ def _run_codex_wrapper(
     sleep: Callable[[float], None],
     now: Callable[[], float],
     final_message_fallback: bool,
+    codex_home: Path,
 ) -> LaunchResult:
     """One Bridge-managed App Server per wrapped Codex session (spec §4, §5):
     spawn the App Server, wait for its socket, connect the adapter so the
     session is registered/reachable, *then* attach the remote TUI. Tears down
     in reverse order on exit, reaping both children."""
     from .adapters.codex import CodexAdapter
-    from .codex_app_server import (
-        CodexAppServerClient,
-        CodexAppServerProcess,
-        connect_app_server_socket,
-    )
+    from .codex_app_server import MCP_ENV_KEYS, CodexAppServerClient, CodexAppServerProcess
+    from .install import codex_config_path, codex_mcp_server_registered
 
     session_id = new_id()
     paths.ensure_session_dir(session_id)
@@ -310,8 +336,25 @@ def _run_codex_wrapper(
     argv = build_codex_argv(binary, socket_path, user_args)
     child_env = build_identity_env(paths, session_id, base_env)
 
+    # Codex's App Server refuses to boot ("invalid transport in mcp_servers.bridge")
+    # if it is handed `-c mcp_servers.bridge.env.*` overrides for a server that
+    # isn't registered in config.toml at all -- so only pass them when it is.
+    mcp_env: dict[str, str] = {}
+    if codex_mcp_server_registered(codex_home):
+        mcp_env = {key: child_env[key] for key in MCP_ENV_KEYS if key in child_env}
+    else:
+        print(
+            f"[bridge] Codex MCP server not registered in {codex_config_path(codex_home)}; "
+            "run bridge install for Bridge tools inside Codex",
+            file=sys.stderr,
+        )
+
     app_server = CodexAppServerProcess(socket_path, binary=binary)
-    app_server.start(env=child_env, spawn=spawn)
+    app_server.start(
+        env=child_env,
+        spawn=spawn,
+        mcp_env=mcp_env,
+    )
     try:
         app_server.wait_for_socket(app_server_timeout, sleep=sleep, now=now)
     except Exception:
@@ -319,12 +362,7 @@ def _run_codex_wrapper(
         raise
 
     def _reconnect() -> CodexAppServerClient:
-        # A short per-attempt timeout: a dead App Server refuses the
-        # connection immediately (ECONNREFUSED), so this bounds how long one
-        # of CodexAdapter's own backed-off attempts can take, not whether a
-        # live server gets time to answer.
-        sock = connect_app_server_socket(socket_path, timeout=0.5)
-        return CodexAppServerClient(sock).start()
+        return connect_codex_client(socket_path)
 
     def _print_disconnect_diagnostic() -> None:
         print(
@@ -341,6 +379,7 @@ def _run_codex_wrapper(
             app_client,
             final_message_fallback=final_message_fallback,
             cwd=os.getcwd(),
+            paths=paths,
             reconnect=_reconnect,
             on_app_server_disconnect=_print_disconnect_diagnostic,
             reconnect_sleep=sleep,
@@ -351,6 +390,12 @@ def _run_codex_wrapper(
             )
         )
         adapter.start()
+        if adapter.app.codex_version_warning:
+            print(
+                f"[bridge] codex {adapter.app.codex_version}: "
+                f"{adapter.app.codex_version_warning}",
+                file=sys.stderr,
+            )
     except Exception:
         try:
             (adapter or app_client).close()

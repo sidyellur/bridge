@@ -13,6 +13,7 @@ entry; and a socket that never appears fails cleanly with no leaked process.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import signal
@@ -76,7 +77,15 @@ def test_app_server_socket_exists_before_tui_spawn_and_remote_arg(paths, codex_b
     make_fake_codex_exe(bindir, capture=capture, release_file=release, tui_exit_code=0)
 
     with RunningRouter(paths) as rr:
-        env = {"PATH": str(bindir), "BRIDGE_CODEX_BIN": str(bindir / "codex")}
+        env = {
+            "PATH": str(bindir),
+            "BRIDGE_CODEX_BIN": str(bindir / "codex"),
+            # No codex_home is passed explicitly by most of these tests; point
+            # the wrapper's default `$HOME/.codex` resolution at a directory
+            # that can never exist, so it can never pick up mcp_env overrides
+            # (or lack thereof) from the real developer machine's ~/.codex.
+            "HOME": str(bindir.parent / "no-such-home"),
+        }
         result_box = {}
 
         def go():
@@ -113,12 +122,180 @@ def test_app_server_socket_exists_before_tui_spawn_and_remote_arg(paths, codex_b
         assert result_box["result"].session_id in records[0]["argv"][1]
 
 
+def test_app_server_is_launched_with_mcp_env_overrides(paths, tmp_path, ids):
+    """Codex scrubs the environment it hands to the MCP servers it starts
+    from ``~/.codex/config.toml``, so the App Server line must carry the
+    session identity itself as ``-c mcp_servers.bridge.env.*`` overrides --
+    otherwise `bridge serve --family codex` never sees `BRIDGE_SESSION_ID`
+    and exits (see src/bridge/codex_app_server.py::MCP_ENV_KEYS). This only
+    happens when Codex's own config already registers Bridge's MCP server;
+    see the sibling ``..._when_server_not_registered`` test below."""
+    bindir = tmp_path / "bin"
+    capture = tmp_path / "tui_cap.jsonl"
+    release = tmp_path / "release"
+    app_server_capture = tmp_path / "app_server_cap.jsonl"
+    make_fake_codex_exe(
+        bindir,
+        capture=capture,
+        release_file=release,
+        app_server_capture=app_server_capture,
+    )
+    codex_home = tmp_path / "codex_home"
+    codex_home.mkdir()
+    (codex_home / "config.toml").write_text(
+        '[mcp_servers.bridge]\ncommand = "bridge"\nargs = ["serve", "--family", "codex"]\n'
+    )
+
+    with RunningRouter(paths) as rr:
+        env = {
+            "PATH": str(bindir),
+            "BRIDGE_CODEX_BIN": str(bindir / "codex"),
+            # No codex_home is passed explicitly by most of these tests; point
+            # the wrapper's default `$HOME/.codex` resolution at a directory
+            # that can never exist, so it can never pick up mcp_env overrides
+            # (or lack thereof) from the real developer machine's ~/.codex.
+            "HOME": str(bindir.parent / "no-such-home"),
+        }
+        result_box = {}
+
+        def go():
+            result_box["result"] = run_wrapper(
+                "codex",
+                [],
+                paths=paths,
+                env=env,
+                new_id=ids.new,
+                ensure_running=lambda p: None,
+                connect=lambda paths, session_id, role, on_event=None: _connect_with_events(
+                    rr, paths, session_id, role, on_event
+                ),
+                forward_signals=False,
+                print_address=False,
+                codex_home=codex_home,
+            )
+
+        t = threading.Thread(target=go)
+        t.start()
+        try:
+            assert _wait_for(
+                lambda: app_server_capture.exists() and read_captures(app_server_capture)
+            ), "app-server argv was never recorded"
+            assert _wait_for(lambda: capture.exists() and read_captures(capture))
+        finally:
+            release.write_text("go")
+            t.join(timeout=10)
+
+        assert result_box["result"].returncode == 0
+        session_id = result_box["result"].session_id
+        argv = read_captures(app_server_capture)[0]["app_server_argv"]
+        assert argv[:3] == [
+            "app-server",
+            "--listen",
+            f"unix://{paths.codex_socket(session_id)}",
+        ]
+        assert argv[3:] == [
+            "-c",
+            f"mcp_servers.bridge.env.BRIDGE_SESSION_ID={json.dumps(session_id)}",
+            "-c",
+            f"mcp_servers.bridge.env.BRIDGE_ROUTER_SOCKET={json.dumps(str(paths.socket))}",
+            "-c",
+            f"mcp_servers.bridge.env.BRIDGE_ROUTER_TOKEN_PATH={json.dumps(str(paths.token))}",
+            "-c",
+            f"mcp_servers.bridge.env.BRIDGE_HOME={json.dumps(str(paths.home))}",
+        ]
+
+
+def test_app_server_launched_without_mcp_env_overrides_when_server_not_registered(
+    paths, tmp_path, ids, capsys
+):
+    """Passing ``-c mcp_servers.bridge.env.*`` overrides for a server Codex's
+    own config.toml never registers makes the App Server refuse to boot
+    entirely (``invalid transport in mcp_servers.bridge``) -- so a user who
+    never ran ``bridge install`` for Codex must still get a working wrapper,
+    just without Bridge's MCP tools, instead of ``bridge codex`` dying in
+    ``wait_for_socket``."""
+    bindir = tmp_path / "bin"
+    capture = tmp_path / "tui_cap.jsonl"
+    release = tmp_path / "release"
+    app_server_capture = tmp_path / "app_server_cap.jsonl"
+    make_fake_codex_exe(
+        bindir,
+        capture=capture,
+        release_file=release,
+        app_server_capture=app_server_capture,
+    )
+    codex_home = tmp_path / "codex_home"
+    codex_home.mkdir()
+    (codex_home / "config.toml").write_text("# no bridge mcp server registered here\n")
+
+    with RunningRouter(paths) as rr:
+        env = {
+            "PATH": str(bindir),
+            "BRIDGE_CODEX_BIN": str(bindir / "codex"),
+            # No codex_home is passed explicitly by most of these tests; point
+            # the wrapper's default `$HOME/.codex` resolution at a directory
+            # that can never exist, so it can never pick up mcp_env overrides
+            # (or lack thereof) from the real developer machine's ~/.codex.
+            "HOME": str(bindir.parent / "no-such-home"),
+        }
+        result_box = {}
+
+        def go():
+            result_box["result"] = run_wrapper(
+                "codex",
+                [],
+                paths=paths,
+                env=env,
+                new_id=ids.new,
+                ensure_running=lambda p: None,
+                connect=lambda paths, session_id, role, on_event=None: _connect_with_events(
+                    rr, paths, session_id, role, on_event
+                ),
+                forward_signals=False,
+                print_address=False,
+                codex_home=codex_home,
+            )
+
+        t = threading.Thread(target=go)
+        t.start()
+        try:
+            assert _wait_for(
+                lambda: app_server_capture.exists() and read_captures(app_server_capture)
+            ), "app-server argv was never recorded"
+            assert _wait_for(lambda: capture.exists() and read_captures(capture))
+        finally:
+            release.write_text("go")
+            t.join(timeout=10)
+
+        assert result_box["result"].returncode == 0
+        argv = read_captures(app_server_capture)[0]["app_server_argv"]
+        session_id = result_box["result"].session_id
+        assert argv == [
+            "app-server",
+            "--listen",
+            f"unix://{paths.codex_socket(session_id)}",
+        ]
+        err = capsys.readouterr().err
+        assert (
+            f"[bridge] Codex MCP server not registered in {codex_home / 'config.toml'}; "
+            "run bridge install for Bridge tools inside Codex" in err
+        )
+
+
 def test_session_registered_reachable_and_idle_while_tui_runs(paths, codex_bin, ids):
     bindir, capture, release = codex_bin
     make_fake_codex_exe(bindir, capture=capture, release_file=release, tui_exit_code=0)
 
     with RunningRouter(paths) as rr:
-        env = {"PATH": str(bindir), "BRIDGE_CODEX_BIN": str(bindir / "codex")}
+        env = {
+            "PATH": str(bindir),
+            "BRIDGE_CODEX_BIN": str(bindir / "codex"),
+            # No codex_home is passed explicitly by most of these tests; point
+            # the wrapper's default `$HOME/.codex` resolution at a directory
+            # that can never exist, so it can never pick up mcp_env overrides
+            # (or lack thereof) from the real developer machine's ~/.codex.
+            "HOME": str(bindir.parent / "no-such-home"),
+        }
         result_box = {}
 
         def go():
@@ -165,12 +342,81 @@ def test_session_registered_reachable_and_idle_while_tui_runs(paths, codex_bin, 
         assert final["state"] == "offline"
 
 
+def test_session_meta_is_written_for_a_wrapped_codex_session(paths, codex_bin, ids):
+    bindir, capture, release = codex_bin
+    make_fake_codex_exe(bindir, capture=capture, release_file=release, tui_exit_code=0)
+
+    with RunningRouter(paths) as rr:
+        env = {
+            "PATH": str(bindir),
+            "BRIDGE_CODEX_BIN": str(bindir / "codex"),
+            # No codex_home is passed explicitly by most of these tests; point
+            # the wrapper's default `$HOME/.codex` resolution at a directory
+            # that can never exist, so it can never pick up mcp_env overrides
+            # (or lack thereof) from the real developer machine's ~/.codex.
+            "HOME": str(bindir.parent / "no-such-home"),
+        }
+        result_box = {}
+
+        def go():
+            result_box["result"] = run_wrapper(
+                "codex",
+                [],
+                paths=paths,
+                env=env,
+                new_id=ids.new,
+                ensure_running=lambda p: None,
+                connect=lambda paths, session_id, role, on_event=None: _connect_with_events(
+                    rr, paths, session_id, role, on_event
+                ),
+                forward_signals=False,
+                print_address=False,
+            )
+
+        t = threading.Thread(target=go)
+        t.start()
+        try:
+            assert _wait_for(lambda: capture.exists() and read_captures(capture))
+            ctrl = rr.client(session_id="ctrl")
+            assert _wait_for(
+                lambda: any(
+                    s["family"] == "codex" and s["reachable"]
+                    for s in ctrl.call("roster", {})["sessions"]
+                )
+            )
+            session_id = next(
+                s["id"] for s in ctrl.call("roster", {})["sessions"] if s["family"] == "codex"
+            )
+
+            def meta():
+                try:
+                    return json.loads(paths.session_meta(session_id).read_text())
+                except (OSError, json.JSONDecodeError):
+                    return {}
+
+            assert _wait_for(lambda: meta().get("thread_id") == "thread-fake")
+            assert meta()["family"] == "codex"
+            assert meta()["subscribed"] is True
+            assert meta()["codex_version"] == "0.151.0"
+        finally:
+            release.write_text("go")
+            t.join(timeout=15)
+
+
 def test_tui_exit_code_passes_through_and_both_children_reaped(paths, codex_bin, ids):
     bindir, capture, release = codex_bin
     make_fake_codex_exe(bindir, capture=capture, release_file=release, tui_exit_code=9)
 
     with RunningRouter(paths) as rr:
-        env = {"PATH": str(bindir), "BRIDGE_CODEX_BIN": str(bindir / "codex")}
+        env = {
+            "PATH": str(bindir),
+            "BRIDGE_CODEX_BIN": str(bindir / "codex"),
+            # No codex_home is passed explicitly by most of these tests; point
+            # the wrapper's default `$HOME/.codex` resolution at a directory
+            # that can never exist, so it can never pick up mcp_env overrides
+            # (or lack thereof) from the real developer machine's ~/.codex.
+            "HOME": str(bindir.parent / "no-such-home"),
+        }
         result_box = {}
         socket_path_box = {}
 
@@ -209,7 +455,15 @@ def test_app_server_crash_marks_session_unreachable_and_records_disconnected(pat
     make_fake_codex_exe(bindir, capture=capture, release_file=release, tui_exit_code=0)
 
     with RunningRouter(paths) as rr:
-        env = {"PATH": str(bindir), "BRIDGE_CODEX_BIN": str(bindir / "codex")}
+        env = {
+            "PATH": str(bindir),
+            "BRIDGE_CODEX_BIN": str(bindir / "codex"),
+            # No codex_home is passed explicitly by most of these tests; point
+            # the wrapper's default `$HOME/.codex` resolution at a directory
+            # that can never exist, so it can never pick up mcp_env overrides
+            # (or lack thereof) from the real developer machine's ~/.codex.
+            "HOME": str(bindir.parent / "no-such-home"),
+        }
         result_box = {}
 
         def go():
@@ -275,7 +529,15 @@ def test_app_server_socket_never_appearing_fails_cleanly_with_no_leak(paths, tmp
     make_capture_exe(bindir, "codex", capture)
 
     with RunningRouter(paths) as rr:
-        env = {"PATH": str(bindir), "BRIDGE_CODEX_BIN": str(bindir / "codex")}
+        env = {
+            "PATH": str(bindir),
+            "BRIDGE_CODEX_BIN": str(bindir / "codex"),
+            # No codex_home is passed explicitly by most of these tests; point
+            # the wrapper's default `$HOME/.codex` resolution at a directory
+            # that can never exist, so it can never pick up mcp_env overrides
+            # (or lack thereof) from the real developer machine's ~/.codex.
+            "HOME": str(bindir.parent / "no-such-home"),
+        }
         with pytest.raises(Exception, match="codex app-server"):
             run_wrapper(
                 "codex",
@@ -305,12 +567,20 @@ def test_unsupported_app_server_version_stops_app_server_and_spawns_no_tui(paths
         bindir,
         capture=capture,
         release_file=release,
-        protocol_version="codex-app-server/999",
+        codex_version="0.150.0",
     )
 
     with RunningRouter(paths) as rr:
-        env = {"PATH": str(bindir), "BRIDGE_CODEX_BIN": str(bindir / "codex")}
-        with pytest.raises(Exception, match="codex-app-server/999"):
+        env = {
+            "PATH": str(bindir),
+            "BRIDGE_CODEX_BIN": str(bindir / "codex"),
+            # No codex_home is passed explicitly by most of these tests; point
+            # the wrapper's default `$HOME/.codex` resolution at a directory
+            # that can never exist, so it can never pick up mcp_env overrides
+            # (or lack thereof) from the real developer machine's ~/.codex.
+            "HOME": str(bindir.parent / "no-such-home"),
+        }
+        with pytest.raises(Exception, match="predates the pinned App Server contract"):
             run_wrapper(
                 "codex",
                 [],
@@ -328,3 +598,37 @@ def test_unsupported_app_server_version_stops_app_server_and_spawns_no_tui(paths
     # No TUI was ever spawned (the adapter failed its handshake first), and
     # the App Server was still stopped/reaped rather than left running.
     assert not capture.exists() or not read_captures(capture)
+
+
+def test_reconnect_factory_closes_the_socket_when_the_client_cannot_start(tmp_path, monkeypatch):
+    """`CodexAdapter` retries this factory on a backoff, so a client that fails
+    to start (a handshake the App Server never completes) must not leave its
+    connected socket for the garbage collector: five attempts would leak five
+    fds against an App Server that is up but wedged."""
+    import socket as socket_mod
+
+    from bridge import codex_app_server, launch
+
+    sockets: list = []
+
+    class FailingClient:
+        def __init__(self, sock, **_kwargs) -> None:
+            sockets.append(sock)
+
+        def start(self):
+            raise OSError("handshake never completed")
+
+    monkeypatch.setattr(codex_app_server, "CodexAppServerClient", FailingClient)
+
+    socket_path = tmp_path / "app.sock"
+    listener = socket_mod.socket(socket_mod.AF_UNIX, socket_mod.SOCK_STREAM)
+    listener.bind(str(socket_path))
+    listener.listen(1)
+    try:
+        with pytest.raises(OSError, match="handshake never completed"):
+            launch.connect_codex_client(socket_path)
+    finally:
+        listener.close()
+
+    assert len(sockets) == 1
+    assert sockets[0].fileno() == -1, "the connected socket was left open"

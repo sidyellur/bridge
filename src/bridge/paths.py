@@ -20,6 +20,13 @@ ROUTER_SOCKET_ENV = "BRIDGE_ROUTER_SOCKET"
 ROUTER_TOKEN_ENV = "BRIDGE_ROUTER_TOKEN_PATH"
 SESSION_ID_ENV = "BRIDGE_SESSION_ID"
 
+#: Name Bridge registers itself under in ``~/.codex/config.toml``
+#: (``[mcp_servers.<name>]``) and the matching prefix of every
+#: ``-c mcp_servers.<name>.env.<KEY>=<value>`` App Server override. A leaf
+#: constant (this module imports nothing local) so ``codex_app_server.py``,
+#: ``install.py`` and ``doctor.py`` can all import it with no import-cycle risk.
+CODEX_MCP_SERVER_NAME = "bridge"
+
 
 @dataclass(frozen=True)
 class Paths:

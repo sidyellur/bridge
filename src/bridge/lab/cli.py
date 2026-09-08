@@ -37,11 +37,18 @@ from pathlib import Path
 from typing import Any
 
 from .. import __version__
+from ..codex_app_server import (
+    FORBIDDEN_METHODS,
+    N_ITEM_COMPLETED,
+    N_ITEM_DELTA,
+    N_ITEM_STARTED,
+)
 from ..paths import Paths
 from .capture import (
     CAPTURE_ENV,
     CAPTURE_FILENAME,
     CAPTURE_FULL_ENV,
+    DIRECTION_OUT,
     CaptureTail,
     frame_method,
     frame_params,
@@ -53,9 +60,28 @@ RUNS_RELPATH = Path("docs/experiments/runs")
 VERDICT_PREFIX = "Verdict:"
 LAB_SESSION_ID = "bridge-lab"
 
-#: Never issued, never expected. Seeing one in a capture fails Experiment G
+#: Never issued, never expected. Seeing one *sent by Bridge* fails Experiment G
 #: outright, whatever else happened.
-FORBIDDEN_FRAME_METHODS = ("turn/steer",)
+FORBIDDEN_FRAME_METHODS = FORBIDDEN_METHODS
+
+#: The real ``RpcEndpoint``/``RouterServer`` source names Bridge's own
+#: components capture frames under (``bridge/server.py``,
+#: ``bridge/claude_channel.py``, ``bridge/codex_app_server.py``,
+#: ``bridge/router.py``) -- referenced, not duplicated, so this can't drift
+#: from the actual endpoint names. A shared capture file also carries frames
+#: from whatever fake/test peer Bridge is talking to (e.g. a test's
+#: ``fake-codex-app-server``, or bare endpoint names like ``left``/``right``
+#: in unrelated tests); a forbidden method on one of *those* is not Bridge
+#: steering anything and must never count.
+def bridge_sources() -> tuple[str, ...]:
+    """Capture ``source`` names of Bridge's own endpoints. Imported lazily so
+    `bridge --version` never pays for the router/server/channel modules."""
+    from ..claude_channel import RPC_ENDPOINT_NAME as claude_channel_source
+    from ..codex_app_server import RPC_ENDPOINT_NAME as codex_app_server_source
+    from ..router import FRAME_SOURCE as router_source
+    from ..server import RPC_ENDPOINT_NAME as bridge_mcp_source
+
+    return (codex_app_server_source, claude_channel_source, bridge_mcp_source, router_source)
 
 CHANNEL_NOTIFICATION = "notifications/claude/channel"
 
@@ -418,15 +444,43 @@ def _new_entries(
 
 
 def _steer_frames(ctx: LabContext) -> list[dict[str, Any]]:
-    return [r for r in ctx.tail.all_records() if frame_method(r) in FORBIDDEN_FRAME_METHODS]
+    """Forbidden-method frames that Bridge's own endpoints *sent*.
+
+    A capture file is shared: it also holds frames from whatever peer Bridge
+    is talking to (a live vendor CLI, or a test's fake App Server / arbitrary
+    endpoint names). A forbidden method arriving *from* that peer, or
+    appearing under a source Bridge never registers, is not Bridge steering
+    anything -- only ``direction == "out"`` from one of :func:`bridge_sources`
+    counts against Experiment G.
+    """
+    sources = bridge_sources()
+    return [
+        r
+        for r in ctx.tail.all_records()
+        if frame_method(r) in FORBIDDEN_FRAME_METHODS
+        and r.get("direction") == DIRECTION_OUT
+        and r.get("source") in sources
+    ]
+
+
+def _turn_id(container: Mapping[str, Any]) -> Any:
+    """The turn id lives at ``turn.id`` everywhere in the real contract."""
+    turn = container.get("turn")
+    return turn.get("id") if isinstance(turn, Mapping) else None
+
+
+_ITEM_NOTIFICATION_METHODS = (N_ITEM_STARTED, N_ITEM_DELTA, N_ITEM_COMPLETED)
 
 
 def correlate_turns(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     """Pair ``turn/start`` requests with their ``turn/started`` /
-    ``turn/completed`` notifications through the returned ``turn_id``."""
+    ``turn/completed`` notifications through the returned ``turn_id``, and
+    separately collect the turn ids seen on ``item/*`` notifications."""
     request_ids: set[Any] = set()
     started: set[str] = set()
     completed: set[str] = set()
+    items: list[str] = []
+    seen_items: set[str] = set()
     for rec in records:
         method = frame_method(rec)
         frame = rec.get("frame")
@@ -435,13 +489,18 @@ def correlate_turns(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         if method == "turn/start" and "id" in frame:
             request_ids.add(frame["id"])
         elif method == "turn/started":
-            turn_id = frame_params(rec).get("turn_id")
+            turn_id = _turn_id(frame_params(rec))
             if isinstance(turn_id, str):
                 started.add(turn_id)
         elif method == "turn/completed":
-            turn_id = frame_params(rec).get("turn_id")
+            turn_id = _turn_id(frame_params(rec))
             if isinstance(turn_id, str):
                 completed.add(turn_id)
+        elif method in _ITEM_NOTIFICATION_METHODS:
+            turn_id = frame_params(rec).get("turnId")
+            if isinstance(turn_id, str) and turn_id and turn_id not in seen_items:
+                seen_items.add(turn_id)
+                items.append(turn_id)
 
     turn_ids: list[str] = []
     for rec in records:
@@ -452,7 +511,7 @@ def correlate_turns(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             continue
         result = frame.get("result")
         if isinstance(result, Mapping):
-            turn_id = result.get("turn_id")
+            turn_id = _turn_id(result)
             if isinstance(turn_id, str) and turn_id and turn_id not in turn_ids:
                 turn_ids.append(turn_id)
 
@@ -461,6 +520,7 @@ def correlate_turns(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         "turn_ids": turn_ids,
         "started": sorted(started),
         "completed": sorted(completed),
+        "items": items,
         "correlated": [t for t in turn_ids if t in started and t in completed],
     }
 
@@ -568,6 +628,7 @@ def _run_f(ctx: LabContext) -> tuple[int, dict[str, Any]]:
     ctx.out(f"observed: turn/started: {correlation['started'] or '(none)'}")
     ctx.out(f"observed: turn/completed: {correlation['completed'] or '(none)'}")
     ctx.out(f"observed: correlated start->completed: {correlation['correlated'] or '(none)'}")
+    ctx.out(f"observed: item notifications for turn ids: {correlation['items'] or '(none)'}")
     if not ctx.tail.exists():
         ctx.out(f"warning: no capture file; is {CAPTURE_ENV} exported in the session's terminal?")
 
@@ -631,9 +692,12 @@ def _run_g(ctx: LabContext) -> tuple[int, dict[str, Any]]:
 
     steer = _steer_frames(ctx)
     if steer:
-        ctx.out(f"FAIL: {len(steer)} turn/steer frame(s) in the capture - v1 must never steer")
+        ctx.out(
+            f"FAIL: {len(steer)} forbidden frame(s) sent by Bridge - "
+            "Bridge must never steer or interrupt"
+        )
     else:
-        ctx.out("observed: no turn/steer frame in the capture")
+        ctx.out("observed: no turn/steer frame sent by Bridge")
 
     ok = became_busy and held and delivered and not steer
     return (0 if ok else 1), {

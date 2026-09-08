@@ -55,6 +55,13 @@ SYSTEM_INSTRUCTIONS = (
 )
 
 
+#: The ``RpcEndpoint`` name this adapter registers under -- also the
+#: ``source`` field a `bridge lab` capture records for every frame it
+#: sends/receives. Named here so ``bridge.lab.cli`` can reference the real
+#: value instead of duplicating the ``name="claude-channel"`` literal below.
+RPC_ENDPOINT_NAME = "claude-channel"
+
+
 def channel_meta(event: Mapping[str, Any]) -> dict[str, str]:
     """The event's metadata as the documented ``meta`` attribute map."""
     return {
@@ -79,7 +86,7 @@ class ClaudeChannelAdapter:
     ) -> None:
         self.session_id = session_id
         self.cwd = cwd or os.getcwd()
-        self.rpc = RpcEndpoint(host_sock, name="claude-channel")
+        self.rpc = RpcEndpoint(host_sock, name=RPC_ENDPOINT_NAME)
         self.router: Any = None
         self.client_info: dict[str, Any] = {}
         self.client_capabilities: dict[str, Any] = {}
