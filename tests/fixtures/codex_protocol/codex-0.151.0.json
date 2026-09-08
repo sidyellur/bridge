@@ -88,7 +88,7 @@
     "no_subscribe_method_exists": true,
     "turn_and_item_notifications_are_subscriber_only": true,
     "thread_status_changed_is_global_broadcast": true,
-    "bindable_thread_rule": "ephemeral is not true and threadSource == user",
+    "bindable_thread_rule": "ephemeral is not true and (threadSource is missing, null, or == user)",
     "codex_spawns_ephemeral_system_threads_after_user_turns": true
   },
   "known_broken_0_151_0": {

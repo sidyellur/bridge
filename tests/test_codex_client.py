@@ -147,7 +147,7 @@ def test_pinned_contract_matches_the_fixture():
     assert THREAD_SOURCE_USER == "user"
     assert (
         CONTRACT["thread_discovery"]["bindable_thread_rule"]
-        == "ephemeral is not true and threadSource == user"
+        == "ephemeral is not true and (threadSource is missing, null, or == user)"
     )
     # Thread.required (per the real 0.151.0 schema) includes `ephemeral` but not
     # `threadSource` -- the latter is optional *and* nullable.

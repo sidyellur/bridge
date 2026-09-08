@@ -612,7 +612,7 @@ def test_run_g_hard_fails_on_any_turn_steer_frame(paths, run_dir):
 
 def test_steer_scan_ignores_frames_from_non_bridge_sources(tmp_path):
     """``_steer_frames`` counts only ``turn/steer``-family frames that Bridge's
-    own endpoints *sent* (direction ``out``, source in ``BRIDGE_SOURCES``) --
+    own endpoints *sent* (direction ``out``, source in ``bridge_sources()``) --
     not any forbidden method that merely appears somewhere in a shared
     capture, regardless of who wrote it or which direction it went."""
     from bridge.lab.cli import _steer_frames

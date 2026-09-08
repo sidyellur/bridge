@@ -37,17 +37,13 @@ from pathlib import Path
 from typing import Any
 
 from .. import __version__
-from ..claude_channel import RPC_ENDPOINT_NAME as CLAUDE_CHANNEL_SOURCE
 from ..codex_app_server import (
     FORBIDDEN_METHODS,
     N_ITEM_COMPLETED,
     N_ITEM_DELTA,
     N_ITEM_STARTED,
 )
-from ..codex_app_server import RPC_ENDPOINT_NAME as CODEX_APP_SERVER_SOURCE
 from ..paths import Paths
-from ..router import FRAME_SOURCE as ROUTER_SOURCE
-from ..server import RPC_ENDPOINT_NAME as BRIDGE_MCP_SOURCE
 from .capture import (
     CAPTURE_ENV,
     CAPTURE_FILENAME,
@@ -77,7 +73,15 @@ FORBIDDEN_FRAME_METHODS = FORBIDDEN_METHODS
 #: ``fake-codex-app-server``, or bare endpoint names like ``left``/``right``
 #: in unrelated tests); a forbidden method on one of *those* is not Bridge
 #: steering anything and must never count.
-BRIDGE_SOURCES = (CODEX_APP_SERVER_SOURCE, CLAUDE_CHANNEL_SOURCE, BRIDGE_MCP_SOURCE, ROUTER_SOURCE)
+def bridge_sources() -> tuple[str, ...]:
+    """Capture ``source`` names of Bridge's own endpoints. Imported lazily so
+    `bridge --version` never pays for the router/server/channel modules."""
+    from ..claude_channel import RPC_ENDPOINT_NAME as claude_channel_source
+    from ..codex_app_server import RPC_ENDPOINT_NAME as codex_app_server_source
+    from ..router import FRAME_SOURCE as router_source
+    from ..server import RPC_ENDPOINT_NAME as bridge_mcp_source
+
+    return (codex_app_server_source, claude_channel_source, bridge_mcp_source, router_source)
 
 CHANNEL_NOTIFICATION = "notifications/claude/channel"
 
@@ -446,15 +450,16 @@ def _steer_frames(ctx: LabContext) -> list[dict[str, Any]]:
     is talking to (a live vendor CLI, or a test's fake App Server / arbitrary
     endpoint names). A forbidden method arriving *from* that peer, or
     appearing under a source Bridge never registers, is not Bridge steering
-    anything -- only ``direction == "out"`` from one of :data:`BRIDGE_SOURCES`
+    anything -- only ``direction == "out"`` from one of :func:`bridge_sources`
     counts against Experiment G.
     """
+    sources = bridge_sources()
     return [
         r
         for r in ctx.tail.all_records()
         if frame_method(r) in FORBIDDEN_FRAME_METHODS
         and r.get("direction") == DIRECTION_OUT
-        and r.get("source") in BRIDGE_SOURCES
+        and r.get("source") in sources
     ]
 
 
